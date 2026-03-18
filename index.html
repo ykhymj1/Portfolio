@@ -801,9 +801,13 @@ const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFx
 
   const handleFetch=async()=>{
     setLoading(true);
-    await onFetchFx();
+    const result=await onFetchFx();
     setLoading(false);
-    showToast("환율 갱신 완료!");
+    if(result){
+      showToast("환율 $1=₩"+result+" 갱신 완료!");
+    }else{
+      showToast("환율 조회 실패. 네트워크를 확인해주세요.","error");
+    }
   };
 
   return(<div className="modal-overlay" onClick={onClose}>
@@ -826,8 +830,8 @@ const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFx
             ?(<>
               <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:4}}>$1 = ₩{fxRate}</div>
               <div style={{fontSize:11,color:C.green}}>✅ 자동 업데이트 성공</div>
-              {fxTime&&<div style={{fontSize:12,color:C.accent,marginTop:3}}>⏱ 마지막 업데이트: <b>{fxTime}</b></div>}
-              <div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: Yahoo Finance USD/KRW</div>
+              {fxTime&&<div style={{fontSize:12,color:C.accent,marginTop:3}}>⏱ 마지막 업데이트: <b style={{color:"#fbbf24"}}>{fxTime}</b></div>}
+              <div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: frankfurter.app / Yahoo Finance</div>
             </>)
             :(<>
               <div style={{fontSize:13,color:C.sub}}>아직 자동 조회 전입니다.</div>
@@ -939,32 +943,42 @@ function App(){
       fxRateRef.current=rounded;
       setFxAuto(true);
       setFxTime(time);
-      // ★ 환율 캐시 저장 → 다음 앱 실행시 즉시 복원
-      try{ localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time})); }catch(e){}
+      try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time}));}catch(e){}
       return rounded;
     };
-    const yahooUrl="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
-    // ★ allorigins + codetabs 동시 요청 → 먼저 성공한 것 사용
-    // allorigins 먼저, 실패시 codetabs 순차 시도
-    const parseFx=(j,direct)=>{
+    // 타임아웃 fetch 헬퍼 (ms)
+    const fetchTimeout=async(url,ms)=>{
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),ms);
       try{
-        const raw=direct?j:JSON.parse(j?.contents||"{}");
-        const krw=raw?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if(krw&&krw>500&&krw<5000)return krw;
-      }catch(e){}
-      return null;
+        const r=await fetch(url,{signal:ctrl.signal});
+        clearTimeout(t);
+        return r;
+      }catch(e){clearTimeout(t);throw e;}
     };
+    // API1: frankfurter.app (ECB 공식, 빠름, CORS 완전지원)
     try{
-      const res=await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`);
-      const j=await res.json();
-      const krw=parseFx(j,false);
-      if(krw)return applyFx(krw);
+      const r=await fetchTimeout("https://api.frankfurter.app/latest?from=USD&to=KRW",5000);
+      const j=await r.json();
+      const krw=j&&j.rates&&j.rates.KRW;
+      if(krw&&krw>500&&krw<5000)return applyFx(krw);
     }catch(e){}
+    // API2: open.er-api.com
     try{
-      const res=await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`);
-      const j=await res.json();
-      const krw=parseFx(j,true);
-      if(krw)return applyFx(krw);
+      const r=await fetchTimeout("https://open.er-api.com/v6/latest/USD",5000);
+      const j=await r.json();
+      const krw=j&&j.rates&&j.rates.KRW;
+      if(krw&&krw>500&&krw<5000)return applyFx(krw);
+    }catch(e){}
+    // API3: Yahoo Finance via allorigins
+    try{
+      const yu="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
+      const r=await fetchTimeout("https://api.allorigins.win/get?url="+encodeURIComponent(yu),8000);
+      const j=await r.json();
+      const raw=j&&j.contents?JSON.parse(j.contents):{};
+      const meta=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0]&&raw.chart.result[0].meta;
+      const krw=meta&&meta.regularMarketPrice;
+      if(krw&&krw>500&&krw<5000)return applyFx(krw);
     }catch(e){}
     return null;
   },[]);
@@ -982,53 +996,53 @@ function App(){
       });
     });
 
-    // ★ 단일 종목 시세 조회 - allorigins 우선, 실패시 codetabs 순차 시도 (안정적)
+    // ★ 단일 종목 시세 조회 - 타임아웃 10초, allorigins→codetabs 순차
     const fetchOneTicker=async(tk)=>{
-      const yahooUrl=`https://query1.finance.yahoo.com/v8/finance/chart/${tk}?interval=1d&range=1d`;
+      const yahooUrl="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
       const parseYahoo=(j)=>{
         try{
-          const raw=j?.contents?JSON.parse(j.contents):j;
-          const meta=raw?.chart?.result?.[0]?.meta;
+          const raw=j&&j.contents?JSON.parse(j.contents):j;
+          const res=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0];
+          const meta=res&&res.meta;
           if(meta&&meta.regularMarketPrice)
             return{price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
         }catch(e){}
         return null;
       };
-      const tryProxy=async(proxyUrl)=>{
-        const res=await fetch(proxyUrl);
-        const j=await res.json();
-        const result=parseYahoo(j);
-        if(!result)throw new Error("no data");
-        return result;
+      const fetchT=async(url,ms)=>{
+        const ctrl=new AbortController();
+        const t=setTimeout(()=>ctrl.abort(),ms);
+        try{const r=await fetch(url,{signal:ctrl.signal});clearTimeout(t);return r;}
+        catch(e){clearTimeout(t);throw e;}
       };
-      // allorigins 먼저 시도
+      // allorigins 먼저 (10초)
       try{
-        return await tryProxy(`https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`);
-      }catch(e1){}
-      // 실패시 codetabs 시도
+        const r=await fetchT("https://api.allorigins.win/get?url="+encodeURIComponent(yahooUrl),10000);
+        const j=await r.json();
+        const result=parseYahoo(j);
+        if(result)return result;
+      }catch(e){}
+      // codetabs 시도 (10초)
       try{
-        return await tryProxy(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`);
-      }catch(e2){}
+        const r=await fetchT("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(yahooUrl),10000);
+        const j=await r.json();
+        const result=parseYahoo(j);
+        if(result)return result;
+      }catch(e){}
       return null;
     };
 
     const allTickers=[...tickers];
-    // ★ 5개씩 배치 처리 - 브라우저 연결 throttling 방지
-    const BATCH=5;
-    const batches=[];
-    for(let i=0;i<allTickers.length;i+=BATCH) batches.push(allTickers.slice(i,i+BATCH));
-
-    // 환율 + 첫 배치 동시 시작
     const newP={};
-    const processBatch=async(batch)=>{
-      const results=await Promise.allSettled(batch.map(tk=>fetchOneTicker(tk)));
-      results.forEach((r,i)=>{if(r?.status==="fulfilled"&&r.value)newP[batch[i]]=r.value;});
-    };
 
-    // 환율과 모든 배치 병렬 실행
+    // ★ 환율 + 모든 종목 완전 병렬 처리 (배치 없음 - 각 종목이 allorigins→codetabs 순차라 안전)
+    const tickerPromises=allTickers.map(async(tk)=>{
+      const result=await fetchOneTicker(tk);
+      if(result)newP[tk]=result;
+    });
     await Promise.all([
       fetchFxRate(),
-      (async()=>{for(const batch of batches)await processBatch(batch);})()
+      Promise.allSettled(tickerPromises)
     ]);
 
     if(Object.keys(newP).length>0){
@@ -1106,25 +1120,31 @@ function App(){
   const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
     if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
     const tk=assetType==="국내ETF"?ticker+".KS":ticker;
+    const url="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
     const doFetch=async(proxyUrl,direct)=>{
-      const res=await fetch(proxyUrl);
-      const j=await res.json();
-      const raw=direct?j:JSON.parse(j?.contents||"{}");
-      const meta=raw?.chart?.result?.[0]?.meta;
-      if(meta&&meta.regularMarketPrice){
-        const pInfo={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
-        setPrices(prev=>{const next={...prev,[tk]:pInfo};sv(SK_PRICES,next);return next;});
-        return true;
-      }
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),10000);
+      try{
+        const res=await fetch(proxyUrl,{signal:ctrl.signal});
+        clearTimeout(t);
+        const j=await res.json();
+        const raw=direct?j:(j&&j.contents?JSON.parse(j.contents):{});
+        const ch=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0];
+        const meta=ch&&ch.meta;
+        if(meta&&meta.regularMarketPrice){
+          const pInfo={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
+          setPrices(prev=>{const next={...prev,[tk]:pInfo};sv(SK_PRICES,next);return next;});
+          return true;
+        }
+      }catch(e){clearTimeout(t);}
       return false;
     };
-    const url=`https://query1.finance.yahoo.com/v8/finance/chart/${tk}?interval=1d&range=1d`;
     try{
-      const ok=await doFetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,false);
+      const ok=await doFetch("https://api.allorigins.win/get?url="+encodeURIComponent(url),false);
       if(ok)return;
     }catch(e){}
     try{
-      await doFetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,true);
+      await doFetch("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(url),true);
     }catch(e){}
   },[]);
 
@@ -1239,7 +1259,9 @@ function App(){
             </div>
           ))}
         </div>
-        <div style={{fontSize:10,color:C.muted,marginTop:6}}>※ AMT 계좌 수익 1/2만 내 몫 · $1=₩{fxRate}{fxTime?` (환율 ${fxTime})`:""}</div>
+        <div style={{fontSize:10,color:C.muted,marginTop:6}}>
+          ※ AMT/AMT CMA 1/2 · {fetching&&!fxAuto?"⏳ 환율 조회중...":fxAuto?`$1=₩${fxRate} · 환율 ${fxTime}`:`$1=₩${fxRate}`}
+        </div>
 
         {/* 자동갱신 바 */}
         <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
