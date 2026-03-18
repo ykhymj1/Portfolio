@@ -156,18 +156,19 @@ const{useState,useEffect,useCallback,useMemo,useRef,memo}=React;
 
 /* ─── 상수 ─── */
 const ACCOUNTS=[
-  {id:"amt",    label:"AMT 계좌", short:"AMT",  shared:true, color:"#f59e0b",icon:"🤝",types:["국내ETF","미국주식","미국ETF"]},
-  {id:"myamt",  label:"My AMT",   short:"MyAMT",shared:false,color:"#60a5fa",icon:"💎",types:["국내ETF","미국주식","미국ETF"]},
-  {id:"general",label:"일반계좌", short:"일반", shared:false,color:"#34d399",icon:"📂",types:["미국주식","미국ETF"]},
-  {id:"pension",label:"퇴직연금", short:"퇴직", shared:false,color:"#a78bfa",icon:"🏦",types:["국내ETF","펀드","적금"],directInput:true},
-  {id:"irp",    label:"IRP",      short:"IRP",  shared:false,color:"#fb923c",icon:"🔒",types:["국내ETF","펀드"]},
-  {id:"isa",    label:"ISA",      short:"ISA",  shared:false,color:"#f472b6",icon:"🌱",types:["국내ETF","펀드"]},
-  {id:"cma",    label:"CMA",      short:"CMA",  shared:false,color:"#06b6d4",icon:"💳",types:["CMA"],cmaType:true},
+  {id:"amt",    label:"AMT 계좌",     short:"AMT",     shared:true, color:"#f59e0b",icon:"🤝",types:["국내ETF","미국주식","미국ETF"]},
+  {id:"myamt",  label:"My AMT",       short:"MyAMT",   shared:false,color:"#60a5fa",icon:"💎",types:["국내ETF","미국주식","미국ETF"]},
+  {id:"general",label:"일반계좌",     short:"일반",    shared:false,color:"#34d399",icon:"📂",types:["미국주식","미국ETF"]},
+  {id:"pension",label:"퇴직연금",     short:"퇴직",    shared:false,color:"#a78bfa",icon:"🏦",types:["국내ETF","펀드","적금"],directInput:true},
+  {id:"irp",    label:"IRP",          short:"IRP",     shared:false,color:"#fb923c",icon:"🔒",types:["국내ETF","펀드"]},
+  {id:"isa",    label:"ISA",          short:"ISA",     shared:false,color:"#f472b6",icon:"🌱",types:["국내ETF","펀드"]},
+  {id:"cma",    label:"내 CMA",       short:"내CMA",   shared:false,color:"#06b6d4",icon:"💳",types:["CMA"],cmaType:true},
+  {id:"amtcma", label:"AMT CMA",      short:"AMTCMA",  shared:true, color:"#0891b2",icon:"🤝💳",types:["CMA"],cmaType:true},
 ];
 const AUTO_TYPES=["국내ETF","미국주식","미국ETF"];
 const TYPE_COLORS={"국내ETF":"#f59e0b","미국주식":"#60a5fa","미국ETF":"#a78bfa","펀드":"#34d399","적금":"#fb923c","CMA":"#06b6d4"};
 const DEFAULT_FX=1360;
-const SK="pf_v4";
+const SK="pf_v5";
 const SK_PRICES="pf_prices_cache";
 const GRAPH_START="2025-10-01"; // 그래프 시작일
 const SK_FX="pf_fx_cache";            // 환율 캐시
@@ -391,7 +392,7 @@ function GraphView({allAccounts,myTotal,myPnl,myPct,history}){
       {/* 현재 수익 요약 */}
       <div style={{background:"#0e1c2e",borderRadius:16,padding:"14px 16px",border:`1px solid #1e3250`,borderLeft:`4px solid ${curColor}`,marginBottom:12}}>
         <div style={{fontSize:11,color:"#527a96",marginBottom:5}}>
-          {target==="total"?"📊 내 총자산 (AMT 1/2 포함)":curAcct?`${curAcct.icon} ${curAcct.label}${curAcct.shared?" (1/2)":""}`:""} · 현재
+          {target==="total"?"📊 내 총자산 (AMT·AMT CMA 각 1/2 포함)":curAcct?`${curAcct.icon} ${curAcct.label}${curAcct.shared?" (1/2)":""}`:""} · 현재
         </div>
         <div style={{fontSize:26,fontWeight:800,color:"#f0f4f8",marginBottom:5,letterSpacing:-1}}>{won(nowCur)}</div>
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -763,24 +764,6 @@ function App(){
   },[tab]);
 
   useEffect(()=>{sv(SK,{holdings,fxRate});},[holdings,fxRate]);
-
-  // ★ 매일 수익률 스냅샷 저장 (2025-10-01부터)
-  useEffect(()=>{
-    if(!allAccounts.length||myTotal.current===0)return;
-    const today=new Date().toISOString().slice(0,10);
-    if(today<GRAPH_START)return;
-    try{
-      const hist=ld(SK_HISTORY,{});
-      const snap={total:{invested:myTotal.invested,current:myTotal.current}};
-      allAccounts.forEach(ac=>{const r=ac.shared?0.5:1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
-      hist[today]=snap;
-      // 365일 초과 정리
-      const keys=Object.keys(hist).sort();
-      if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
-      sv(SK_HISTORY,hist);
-      setHistory({...hist}); // ★ state 즉시 업데이트
-    }catch{}
-  },[allAccounts,myTotal]);
   useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(null),2800);return()=>clearTimeout(t);},[toast]);
   const showToast=useCallback((msg,type="success")=>setToast({msg,type}),[]);
 
@@ -950,6 +933,24 @@ function App(){
   const myPnl=myTotal.current-myTotal.invested;
   const myPct=myTotal.invested>0?myPnl/myTotal.invested*100:0;
 
+  // ★ 매일 수익률 스냅샷 저장 (2025-10-01부터) — allAccounts/myTotal 정의 후 배치
+  useEffect(()=>{
+    if(!allAccounts.length||myTotal.current===0)return;
+    const today=new Date().toISOString().slice(0,10);
+    if(today<GRAPH_START)return;
+    try{
+      const hist=ld(SK_HISTORY,{});
+      const snap={total:{invested:myTotal.invested,current:myTotal.current}};
+      allAccounts.forEach(ac=>{const r=ac.shared?0.5:1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
+      hist[today]=snap;
+      const keys=Object.keys(hist).sort();
+      if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
+      sv(SK_HISTORY,hist);
+      setHistory({...hist});
+    }catch{}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[allAccounts,myTotal]);
+
   const curAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===acctTab),[acctTab]);
   const curData=useMemo(()=>calcAcct(acctTab),[calcAcct,acctTab]);
   const mAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===(form._acctId||acctTab)),[form._acctId,acctTab]);
@@ -1093,7 +1094,7 @@ function App(){
             </div>
           ))}
         </div>
-        <div style={{fontSize:10,color:C.muted,marginTop:6}}>※ AMT 계좌 수익 1/2만 내 몫 · $1=₩{fxRate}{fxTime?` (환율 ${fxTime})`:""}</div>
+        <div style={{fontSize:10,color:C.muted,marginTop:6}}>※ AMT·AMT CMA 계좌 수익 각 1/2만 내 몫 · $1=₩{fxRate}{fxTime?` (환율 ${fxTime})`:""}</div>
 
         {/* 자동갱신 바 */}
         <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
@@ -1169,7 +1170,7 @@ function App(){
                     {curAcct.directInput&&<span style={{fontSize:11,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 8px",borderRadius:10}}>📱 직접입력</span>}
                   </div>
                   {curAcct.directInput&&<div style={{fontSize:12,color:C.sub,lineHeight:1.6}}>신한앱 원금+평가금액 입력 → 수익률 자동계산</div>}
-                  {curAcct.shared&&<div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>수익의 1/2이 내 몫으로 집계</div>}
+                  {curAcct.shared&&<div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>수익의 1/2이 내 몫으로 집계 (공동소유 계좌)</div>}
                   <div style={{fontSize:12,color:C.muted,marginTop:4}}>투자원금 {won(curData.invested)}</div>
                 </div>
                 <div style={{textAlign:"right",flexShrink:0}}>
@@ -1253,10 +1254,10 @@ function App(){
         <div style={{padding:16}}>
           <div style={{background:"linear-gradient(135deg,#0d1f35,#0d1a2a)",borderRadius:16,padding:18,border:`1px solid #1a3050`,marginBottom:16}}>
             <div style={{fontSize:14,color:C.sub,fontWeight:700,marginBottom:6}}>🤖 AI 포트폴리오 분석</div>
-            <div style={{fontSize:13,color:C.muted,lineHeight:1.7}}>6개 계좌 전체 데이터를 기반으로 Claude AI에게 분석을 요청하세요.</div>
+            <div style={{fontSize:13,color:C.muted,lineHeight:1.7}}>8개 계좌 전체 데이터를 기반으로 Claude AI에게 분석을 요청하세요.</div>
           </div>
           <ST t="빠른 질문"/>
-          {["전체 포트폴리오 수익률 분석해줘","퇴직연금·IRP·ISA 절세 전략 알려줘","계좌별 자산 재배분 추천해줘","AMT 공동계좌 수익 분배 정리해줘","리스크 높은 자산 알려줘"].map((q,i)=>(
+          {["전체 포트폴리오 수익률 분석해줘","퇴직연금·IRP·ISA 절세 전략 알려줘","계좌별 자산 재배분 추천해줘","AMT·AMT CMA 공동계좌 수익 분배 정리해줘","리스크 높은 자산 알려줘"].map((q,i)=>(
             <button key={i} onClick={()=>setAiQ(q)} style={{width:"100%",minHeight:48,padding:"0 16px",marginBottom:7,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,color:C.sub,fontSize:13,textAlign:"left"}}>💬 {q}</button>
           ))}
           <div style={{display:"flex",gap:8,marginTop:4,marginBottom:14}}>
