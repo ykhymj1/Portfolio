@@ -142,6 +142,13 @@ function doChangePw(){
   if(!ok){document.getElementById("bioBtn").style.opacity="0.35";document.getElementById("bioLabel").textContent="지문 센서 없음";}
   else if(bioCredId){document.getElementById("bioLabel").textContent="지문 인식 (등록됨)";document.getElementById("bioBtn").style.borderColor="#34d399";document.getElementById("bioBtn").style.boxShadow="0 4px 24px #34d39933";}
 })();
+
+/* ★ 잠금화면 표시 즉시 캐시 복원 예열 (시세 조회 없음 - React가 담당)
+   잠금화면 → 비번/지문 → unlock → React 즉시 캐시 표시 → 백그라운드 갱신 */
+window.__cache = {
+  prices: (()=>{try{return JSON.parse(localStorage.getItem("pf_prices_cache")||"{}");}catch{return{};}}()),
+  fxCache: (()=>{try{return JSON.parse(localStorage.getItem("pf_fx_cache")||"null");}catch{return null;}}()),
+};
 </script>
 
 <script type="text/babel">
@@ -155,12 +162,17 @@ const ACCOUNTS=[
   {id:"pension",label:"퇴직연금", short:"퇴직", shared:false,color:"#a78bfa",icon:"🏦",types:["국내ETF","펀드","적금"],directInput:true},
   {id:"irp",    label:"IRP",      short:"IRP",  shared:false,color:"#fb923c",icon:"🔒",types:["국내ETF","펀드"]},
   {id:"isa",    label:"ISA",      short:"ISA",  shared:false,color:"#f472b6",icon:"🌱",types:["국내ETF","펀드"]},
+  {id:"cma",    label:"CMA",      short:"CMA",  shared:false,color:"#06b6d4",icon:"💳",types:["CMA"],cmaType:true},
 ];
 const AUTO_TYPES=["국내ETF","미국주식","미국ETF"];
-const TYPE_COLORS={"국내ETF":"#f59e0b","미국주식":"#60a5fa","미국ETF":"#a78bfa","펀드":"#34d399","적금":"#fb923c"};
+const TYPE_COLORS={"국내ETF":"#f59e0b","미국주식":"#60a5fa","미국ETF":"#a78bfa","펀드":"#34d399","적금":"#fb923c","CMA":"#06b6d4"};
 const DEFAULT_FX=1360;
 const SK="pf_v4";
-const TABS=["dash","accounts","ai"];
+const SK_PRICES="pf_prices_cache";
+const GRAPH_START="2025-10-01"; // 그래프 시작일
+const SK_FX="pf_fx_cache";            // 환율 캐시
+const TABS=["dash","accounts","graph","ai"];
+const SK_HISTORY="pf_history_v1";
 
 /* ─── 유틸 ─── */
 const toKRW=(n,cur,fx)=>cur==="USD"?n*(fx||DEFAULT_FX):n;
@@ -183,6 +195,18 @@ const calcFund=h=>{
   if(!nav||!qty)return null;
   const cur=nav*qty,inv=avgNav>0?avgNav*qty:cur;
   return{current:cur,invested:inv,pnl:cur-inv,pct:inv>0?(cur-inv)/inv*100:0};
+};
+
+// ★ CMA 이자 자동계산 (단리: 매일 원금 × 연이율/365)
+const calcCMA=h=>{
+  const principal=parseFloat(h.principal)||0;
+  const rate=parseFloat(h.rate)||0;
+  const start=parseDate(h.startDate);
+  if(!principal||!rate||!start)return null;
+  const days=Math.max(0,Math.floor((new Date()-start)/86400000));
+  const interest=principal*(rate/100)*(days/365);
+  const current=principal+interest;
+  return{principal,current,pnl:interest,pct:principal>0?(interest/principal)*100:0,days,dailyInterest:principal*(rate/100)/365};
 };
 
 /* ─── 색상 ─── */
@@ -251,6 +275,201 @@ function DonutChart({holdings,calcH,prices,fxRate}){
   </div>);
 }
 
+/* ════════════════════════════════════════════
+   수익률 히스토리 그래프
+════════════════════════════════════════════ */
+function LineChart({data,color,height=140}){
+  if(!data||data.length<2)return null;
+  const W=340,H=height,pt=10,pb=26,pl=44,pr=10;
+  const iw=W-pl-pr,ih=H-pt-pb;
+  const vals=data.map(d=>d.v);
+  const mn=Math.min(...vals),mx=Math.max(...vals);
+  const range=mx-mn||0.01;
+  const gx=(_,i)=>pl+i/(data.length-1)*iw;
+  const gy=v=>pt+ih-(v-mn)/range*ih;
+  const pts=data.map((d,i)=>`${gx(0,i)},${gy(d.v)}`).join(" ");
+  const area=`M${gx(0,0)},${H-pb} `+data.map((d,i)=>`L${gx(0,i)},${gy(d.v)}`).join(" ")+` L${gx(0,data.length-1)},${H-pb} Z`;
+  const yTicks=[mn,mn+range/2,mx];
+  const step=Math.max(1,Math.floor((data.length-1)/4));
+  const lblIdx=[...new Set([0,...[1,2,3,4].map(k=>Math.min(Math.round(k*step),data.length-1))])];
+  const zeroY=mn<0&&mx>0?gy(0):null;
+  const gradId=`g${color.replace(/[^a-z0-9]/gi,"")}`;
+  return(
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:"block",overflow:"visible"}}>
+      <defs><linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={color} stopOpacity="0.35"/>
+        <stop offset="100%" stopColor={color} stopOpacity="0.02"/>
+      </linearGradient></defs>
+      {yTicks.map((v,i)=><line key={i} x1={pl} y1={gy(v)} x2={W-pr} y2={gy(v)} stroke="#1a2d45" strokeWidth={1}/>)}
+      {zeroY&&<line x1={pl} y1={zeroY} x2={W-pr} y2={zeroY} stroke="#3a5470" strokeWidth={1.5} strokeDasharray="4,3"/>}
+      <path d={area} fill={`url(#${gradId})`}/>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round"/>
+      <circle cx={gx(0,data.length-1)} cy={gy(data[data.length-1].v)} r={4} fill={color} stroke="#070e1c" strokeWidth={2}/>
+      {yTicks.map((v,i)=>(
+        <text key={i} x={pl-4} y={gy(v)+4} textAnchor="end" fill="#527a96" fontSize={9} fontFamily="Noto Sans KR,sans-serif">
+          {v>=0?"+":""}{v.toFixed(1)}%
+        </text>
+      ))}
+      {lblIdx.filter(i=>i<data.length).map(i=>(
+        <text key={i} x={gx(0,i)} y={H-4} textAnchor="middle" fill="#527a96" fontSize={9} fontFamily="Noto Sans KR,sans-serif">
+          {data[i].label}
+        </text>
+      ))}
+    </svg>
+  );
+}
+
+function GraphView({allAccounts,myTotal,myPnl,myPct,history}){
+  const[period,setPeriod]=useState("week");
+  const[target,setTarget]=useState("total");
+  const PERIODS=[["day","1일"],["week","주간"],["month","월간"],["year","전체"]];
+
+  // 2025-10-01부터 오늘까지 날짜 목록
+  const allDates=useMemo(()=>{
+    const list=[],start=new Date(GRAPH_START),today=new Date();
+    today.setHours(0,0,0,0);
+    const cur=new Date(start);
+    while(cur<=today){list.push(cur.toISOString().slice(0,10));cur.setDate(cur.getDate()+1);}
+    return list;
+  },[]);
+
+  const dateList=useMemo(()=>{
+    const n=period==="day"?2:period==="week"?7:period==="month"?30:allDates.length;
+    return allDates.slice(-n);
+  },[period,allDates]);
+
+  // forward fill: 데이터 없는 날은 직전값 사용
+  const chartData=useMemo(()=>{
+    if(!dateList.length)return[];
+    let lastSnap=null;
+    const startIdx=allDates.indexOf(dateList[0]);
+    for(let i=0;i<startIdx;i++){const s=history[allDates[i]];if(s?.[target])lastSnap=s[target];}
+    return dateList.map((date,i)=>{
+      const snap=history[date]?.[target];
+      if(snap)lastSnap=snap;
+      if(!lastSnap?.invested)return null;
+      const pct=(lastSnap.current-lastSnap.invested)/lastSnap.invested*100;
+      let label="";
+      const mo=date.slice(5,7),dy=date.slice(8,10);
+      if(period==="day")label=i===0?"어제":"오늘";
+      else if(period==="week")label=`${mo}/${dy}`;
+      else if(period==="month")label=i%5===0?`${mo}/${dy}`:"";
+      else label=date.slice(5,7)==="01"||i===0?date.slice(2,4)+"/"+mo+"월":"";
+      return{date,v:parseFloat(pct.toFixed(3)),cur:lastSnap.current,inv:lastSnap.invested,label};
+    }).filter(Boolean);
+  },[dateList,allDates,history,target,period]);
+
+  const curAcct=target==="total"?null:allAccounts.find(a=>a.id===target);
+  const curColor=curAcct?curAcct.color:"#60a5fa";
+  const nowPct=target==="total"?myPct:(curAcct?.pct||0);
+  const nowPnl=target==="total"?myPnl:(()=>{if(!curAcct)return 0;return(curAcct.current-curAcct.invested)*(curAcct.shared?0.5:1);})();
+  const nowCur=target==="total"?myTotal.current:(curAcct?curAcct.current*(curAcct.shared?0.5:1):0);
+  const nowInv=target==="total"?myTotal.invested:(curAcct?curAcct.invested*(curAcct.shared?0.5:1):0);
+  const periodPct=useMemo(()=>{
+    if(chartData.length<2)return null;
+    const f=chartData[0],l=chartData[chartData.length-1];
+    if(!f?.inv)return null;
+    return(l.cur-f.inv)/f.inv*100;
+  },[chartData]);
+  const hasData=chartData.length>=2;
+  const dataCount=Object.keys(history).filter(d=>d>=GRAPH_START).length;
+
+  return(
+    <div style={{padding:"16px 16px 8px"}}>
+      {/* 타겟 선택 */}
+      <div style={{display:"flex",overflowX:"auto",gap:6,marginBottom:12,paddingBottom:2}}>
+        {[{id:"total",icon:"📊",label:"총자산",color:"#60a5fa"},...ACCOUNTS.map(ac=>({id:ac.id,icon:ac.icon,label:ac.short,color:ac.color}))].map(item=>(
+          <button key={item.id} onClick={()=>setTarget(item.id)} style={{flexShrink:0,padding:"6px 11px",borderRadius:20,fontSize:12,fontWeight:700,
+            border:`1px solid ${target===item.id?item.color:"#1e3250"}`,
+            background:target===item.id?item.color+"22":"transparent",
+            color:target===item.id?item.color:"#527a96"}}>
+            {item.icon} {item.label}
+          </button>
+        ))}
+      </div>
+
+      {/* 현재 수익 요약 */}
+      <div style={{background:"#0e1c2e",borderRadius:16,padding:"14px 16px",border:`1px solid #1e3250`,borderLeft:`4px solid ${curColor}`,marginBottom:12}}>
+        <div style={{fontSize:11,color:"#527a96",marginBottom:5}}>
+          {target==="total"?"📊 내 총자산 (AMT 1/2 포함)":curAcct?`${curAcct.icon} ${curAcct.label}${curAcct.shared?" (1/2)":""}`:""} · 현재
+        </div>
+        <div style={{fontSize:26,fontWeight:800,color:"#f0f4f8",marginBottom:5,letterSpacing:-1}}>{won(nowCur)}</div>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontSize:12,color:"#90b0cc"}}>원금 {won(nowInv)}</span>
+          <span style={{fontSize:13,fontWeight:700,color:nowPct>=0?"#e03131":"#1971c2",background:nowPct>=0?"#e0313120":"#1971c220",padding:"3px 10px",borderRadius:20}}>
+            {nowPct>=0?"▲":"▼"} {Math.abs(nowPct).toFixed(2)}%
+          </span>
+          <span style={{fontSize:13,fontWeight:700,color:nowPnl>=0?"#e03131":"#1971c2"}}>{nowPnl>=0?"+":""}{won(nowPnl)}</span>
+        </div>
+      </div>
+
+      {/* 기간 선택 */}
+      <div style={{display:"flex",gap:6,marginBottom:12}}>
+        {PERIODS.map(([k,v])=>(
+          <button key={k} onClick={()=>setPeriod(k)} style={{flex:1,minHeight:36,fontSize:13,fontWeight:700,
+            border:`1px solid ${period===k?curColor:"#1e3250"}`,
+            background:period===k?curColor+"22":"transparent",
+            borderRadius:10,color:period===k?curColor:"#527a96"}}>{v}</button>
+        ))}
+      </div>
+
+      {/* 그래프 */}
+      <div style={{background:"#0e1c2e",borderRadius:16,padding:"14px 10px 10px",border:"1px solid #1e3250",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingLeft:4,paddingRight:4}}>
+          <div style={{fontSize:12,color:"#90b0cc"}}>수익률 추이 (%)</div>
+          {periodPct!==null&&(
+            <span style={{fontSize:12,fontWeight:700,color:periodPct>=0?"#e03131":"#1971c2",background:periodPct>=0?"#e0313120":"#1971c220",padding:"2px 9px",borderRadius:12}}>
+              기간 {periodPct>=0?"+":""}{periodPct.toFixed(2)}%
+            </span>
+          )}
+        </div>
+        {hasData
+          ?<LineChart data={chartData} color={curColor} height={140}/>
+          :<div style={{textAlign:"center",padding:"28px 16px"}}>
+            <div style={{fontSize:36,marginBottom:10}}>📈</div>
+            <div style={{fontSize:13,color:"#90b0cc",lineHeight:2}}>
+              <b style={{color:"#f0f4f8"}}>2025년 10월 1일</b>부터 수익률 기록<br/>
+              현재 <b style={{color:"#60a5fa"}}>{dataCount}일</b> 데이터 누적<br/>
+              <span style={{fontSize:11,color:"#527a96"}}>
+                {period==="day"?"2일":period==="week"?"7일":period==="month"?"30일":"더 많은 데이터"} 쌓이면 그래프 표시
+              </span>
+            </div>
+          </div>
+        }
+      </div>
+
+      {/* 계좌별 수익률 바 */}
+      <div style={{background:"#0e1c2e",borderRadius:16,padding:16,border:"1px solid #1e3250",marginBottom:12}}>
+        <div style={{fontSize:11,color:"#527a96",fontWeight:700,letterSpacing:.8,textTransform:"uppercase",marginBottom:12}}>계좌별 현재 수익률</div>
+        {allAccounts.filter(ac=>(ac.list||[]).length>0).map(ac=>{
+          const r=ac.shared?0.5:1,myCur=ac.current*r,myInv=ac.invested*r;
+          const p=myInv>0?(myCur-myInv)/myInv*100:0;
+          const w=Math.min(Math.abs(p),20)/20*100;
+          return(
+            <div key={ac.id} style={{marginBottom:11}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{fontSize:13,color:"#f0f4f8",fontWeight:600}}>{ac.icon} {ac.short}</span>
+                <div style={{display:"flex",alignItems:"center",gap:7}}>
+                  <span style={{fontSize:11,color:"#527a96"}}>{won(myCur)}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:p>=0?"#e03131":"#1971c2"}}>{p>=0?"▲":"▼"}{Math.abs(p).toFixed(2)}%</span>
+                </div>
+              </div>
+              <div style={{height:5,background:"#111f33",borderRadius:3,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${w}%`,background:p>=0?"#e03131":"#1971c2",borderRadius:3,transition:"width .6s"}}/>
+              </div>
+            </div>
+          );
+        })}
+        {allAccounts.every(ac=>!(ac.list||[]).length)&&<div style={{textAlign:"center",padding:"16px 0",color:"#527a96",fontSize:13}}>종목을 추가하면 비교가 표시돼요</div>}
+      </div>
+      <div style={{background:"#0a1525",borderRadius:12,padding:"10px 14px",border:"1px solid #1e3250",fontSize:11,color:"#527a96",textAlign:"center"}}>
+        📅 2025년 10월 1일부터 기록 · <b style={{color:"#60a5fa"}}>{dataCount}일</b> 누적 · 매일 앱 열 때 자동 저장
+      </div>
+    </div>
+  );
+}
+
+
 function ConfirmModal({msg,onOk,onCancel}){
   return(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 28px"}}>
     <div style={{background:C.card,borderRadius:18,padding:26,width:"100%",maxWidth:340,border:`1px solid ${C.border}`}}>
@@ -277,7 +496,7 @@ const ModalSelect=memo(function ModalSelect({style,value,onChange,children}){
 });
 
 /* ★ FormModal - App 완전 외부 독립 컴포넌트 */
-const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,fxRate,onSave,onClose}){
+const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,fxRate,onSave,onClose,onFetchTicker}){
   if(!show||!mAcct)return null;
   const INP={background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 14px",fontSize:16,width:"100%",outline:"none",display:"block",transition:"border-color .2s",WebkitUserSelect:"text",userSelect:"text"};
   const at=form.assetType;
@@ -319,6 +538,35 @@ const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,
       <div><Lbl t="메모 (선택)"/><ModalInput style={INP} placeholder="예: 회사입금+개정전 합산" value={form.memo||""} onChange={e=>sf("memo",e.target.value)}/></div>
       <div style={{fontSize:12,color:C.muted,background:C.card2,borderRadius:10,padding:12,border:`1px solid ${C.border}`}}>💡 추가매수 후: 수정 → 원금·평가금액만 업데이트</div>
     </>);
+    // ★ CMA 전용 폼
+    if(at==="CMA")return(<>
+      <div style={{background:"#061a24",border:"1px solid #0e4a5c",borderRadius:12,padding:14}}>
+        <div style={{fontSize:13,color:"#06b6d4",fontWeight:700,marginBottom:6}}>💳 CMA 이자 자동계산</div>
+        <div style={{fontSize:12,color:C.sub,lineHeight:1.7}}>원금·연이율·기산일 입력 → <b style={{color:C.text}}>매일 단리이자 자동계산</b><br/>실제 잔액이 늘어날 때마다 원금을 수정하세요.</div>
+      </div>
+      <div><Lbl t="CMA 상품명 *"/><ModalInput style={INP} placeholder="예: 한국투자 CMA RP형" value={form.name||""} onChange={e=>sf("name",e.target.value)}/></div>
+      <div style={{display:"flex",gap:10}}>
+        <div style={{flex:1}}><Lbl t="현재 원금 (원)"/><ModalInput style={INP} type="number" inputMode="numeric" placeholder="0" value={form.principal||""} onChange={e=>sf("principal",e.target.value)}/></div>
+        <div style={{flex:1}}><Lbl t="연이율 (%)"/><ModalInput style={INP} type="number" inputMode="decimal" step="0.01" placeholder="예: 3.2" value={form.rate||""} onChange={e=>sf("rate",e.target.value)}/></div>
+      </div>
+      <div><Lbl t="기산일 (이자 계산 시작일)"/><ModalInput style={INP} type="date" value={form.startDate||""} onChange={e=>sf("startDate",e.target.value)}/></div>
+      {(()=>{const c=calcCMA({principal:form.principal,rate:form.rate,startDate:form.startDate});if(!c)return null;return(
+        <div style={{background:C.card2,borderRadius:10,padding:14,border:`1px solid ${C.border}`}}>
+          <div style={{fontSize:12,color:C.muted,marginBottom:8}}>📊 오늘 기준 자동계산 ({c.days}일 경과)</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div><div style={{fontSize:11,color:C.muted,marginBottom:3}}>현재 평가금액</div><div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(c.current)}</div></div>
+            <div><div style={{fontSize:11,color:C.muted,marginBottom:3}}>누적 이자</div><div style={{fontSize:15,fontWeight:800,color:"#06b6d4"}}>+{won(c.pnl)}</div></div>
+            <div><div style={{fontSize:11,color:C.muted,marginBottom:3}}>일 이자</div><div style={{fontSize:13,fontWeight:700,color:C.sub}}>+{won(c.dailyInterest)}/일</div></div>
+            <div><div style={{fontSize:11,color:C.muted,marginBottom:3}}>수익률</div><div style={{fontSize:13,fontWeight:700,color:"#06b6d4"}}>+{c.pct.toFixed(3)}%</div></div>
+          </div>
+        </div>
+      );})()}
+      <div style={{background:"#061a24",borderRadius:10,padding:12,border:"1px solid #0e4a5c",fontSize:12,color:C.muted}}>
+        💡 CMA 잔액이 바뀌면 <b style={{color:C.text}}>원금만 수정</b>하세요. 이자는 기산일부터 자동 재계산됩니다.
+      </div>
+      <div><Lbl t="메모 (선택)"/><ModalInput style={INP} placeholder="증권사, 상품명 등" value={form.memo||""} onChange={e=>sf("memo",e.target.value)}/></div>
+    </>);
+
     if(at==="적금")return(<>
       <div style={{background:"#0a1525",border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
         <div style={{fontSize:13,color:"#fb923c",fontWeight:700,marginBottom:6}}>🏦 적금 이자 자동계산</div>
@@ -363,7 +611,13 @@ const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,
       <div><Lbl t="종목명 *"/><ModalInput style={INP} placeholder="예: KODEX 200, AAPL, QQQ" value={form.name||""} onChange={e=>sf("name",e.target.value)}/></div>
       <div>
         <Lbl t="티커 (자동시세용)"/>
-        <ModalInput style={INP} autoCapitalize="characters" placeholder="국내ETF: 069500  미국: AAPL, QQQ" value={form.ticker||""} onChange={e=>sf("ticker",e.target.value.trim().toUpperCase())}/>
+        <ModalInput style={INP} autoCapitalize="characters" placeholder="국내ETF: 069500  미국: AAPL, QQQ" value={form.ticker||""}
+          onChange={e=>{
+            const tk=e.target.value.trim().toUpperCase();
+            sf("ticker",tk);
+            // ★ 티커 입력 완료시 (6자 이상) 즉시 시세 조회
+            if(tk.length>=2&&onFetchTicker)onFetchTicker(tk,form.assetType||"미국주식");
+          }}/>
         <div style={{fontSize:11,color:C.muted,marginTop:5}}>국내ETF: 숫자 6자리 입력 (예: 069500) · .KS 자동추가</div>
       </div>
       <div style={{display:"flex",gap:10}}>
@@ -456,10 +710,22 @@ function App(){
   const[tab,setTab]=useState("dash");
   const[acctTab,setAcctTab]=useState("amt");
   const[holdings,setHoldings]=useState(()=>saved.holdings||{});
-  const[fxRate,setFxRate]=useState(()=>saved.fxRate||DEFAULT_FX);
-  const[fxAuto,setFxAuto]=useState(false); // 자동 환율 적용 여부
-  const[fxTime,setFxTime]=useState(null);   // ★ 환율 마지막 업데이트 시간
-  const[prices,setPrices]=useState({});
+  // ★ 환율: 프리페치 캐시 → localStorage 저장값 → 기본값 순서로 복원
+  const[fxRate,setFxRate]=useState(()=>{
+    try{
+      const cached=JSON.parse(localStorage.getItem(SK_FX)||"{}");
+      if(cached.rate&&cached.rate>500&&cached.rate<5000)return cached.rate;
+    }catch{}
+    return saved.fxRate||DEFAULT_FX;
+  });
+  // ★ fxAuto/fxTime도 캐시에서 복원 → 설정창에서 즉시 "성공" 표시
+  const[fxAuto,setFxAuto]=useState(()=>{
+    try{ const c=JSON.parse(localStorage.getItem(SK_FX)||"{}"); return !!c.rate; }catch{ return false; }
+  });
+  const[fxTime,setFxTime]=useState(()=>{
+    try{ const c=JSON.parse(localStorage.getItem(SK_FX)||"{}"); return c.time||null; }catch{ return null; }
+  });
+  const[prices,setPrices]=useState(()=>ld(SK_PRICES,{})); // ★ 캐시에서 즉시 복원
   const[fetching,setFetching]=useState(false);
   const[countdown,setCountdown]=useState(600);
   const[lastUp,setLastUp]=useState(null);
@@ -471,10 +737,11 @@ function App(){
   const[aiQ,setAiQ]=useState("");
   const[aiA,setAiA]=useState("");
   const[aiLoad,setAiLoad]=useState(false);
+  const[history,setHistory]=useState(()=>ld(SK_HISTORY,{}));
   const holdingsRef=useRef(holdings);
   useEffect(()=>{holdingsRef.current=holdings;},[holdings]);
   // ★ fxRateRef: 환율을 ref로도 유지 → fetchPrices 내 클로저에서 최신값 즉시 사용
-  const fxRateRef=useRef(fxRate);
+  const fxRateRef=useRef(fxRate); // 초기값이 캐시에서 복원됐으므로 즉시 정확한 값
   useEffect(()=>{fxRateRef.current=fxRate;},[fxRate]);
   const fileRef=useRef(null);
 
@@ -496,48 +763,68 @@ function App(){
   },[tab]);
 
   useEffect(()=>{sv(SK,{holdings,fxRate});},[holdings,fxRate]);
+
+  // ★ 매일 수익률 스냅샷 저장 (2025-10-01부터)
+  useEffect(()=>{
+    if(!allAccounts.length||myTotal.current===0)return;
+    const today=new Date().toISOString().slice(0,10);
+    if(today<GRAPH_START)return;
+    try{
+      const hist=ld(SK_HISTORY,{});
+      const snap={total:{invested:myTotal.invested,current:myTotal.current}};
+      allAccounts.forEach(ac=>{const r=ac.shared?0.5:1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
+      hist[today]=snap;
+      // 365일 초과 정리
+      const keys=Object.keys(hist).sort();
+      if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
+      sv(SK_HISTORY,hist);
+      setHistory({...hist}); // ★ state 즉시 업데이트
+    }catch{}
+  },[allAccounts,myTotal]);
   useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(null),2800);return()=>clearTimeout(t);},[toast]);
   const showToast=useCallback((msg,type="success")=>setToast({msg,type}),[]);
 
-  /* ★ 환율 조회 - 새 환율값을 return해서 즉시 미국주식 계산에 반영 */
+  /* ★ 환율 조회 - 두 프록시 동시 race, 먼저 오는 것 사용 (속도 2배 향상) */
   const fetchFxRate=useCallback(async()=>{
-    // 방법1: Yahoo Finance USDKRW=X (주식시세와 동일 방식)
+    const applyFx=(krw)=>{
+      const rounded=Math.round(krw);
+      const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      setFxRate(rounded);
+      fxRateRef.current=rounded;
+      setFxAuto(true);
+      setFxTime(time);
+      // ★ 환율 캐시 저장 → 다음 앱 실행시 즉시 복원
+      try{ localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time})); }catch{}
+      return rounded;
+    };
+    const yahooUrl="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
+    // ★ allorigins + codetabs 동시 요청 → 먼저 성공한 것 사용
+    const tryProxy=async(proxyUrl,parseJson)=>{
+      const ctrl=new AbortController();
+      const timer=setTimeout(()=>ctrl.abort(),6000);
+      try{
+        const res=await fetch(proxyUrl,{signal:ctrl.signal});
+        clearTimeout(timer);
+        const j=await res.json();
+        const krw=parseJson(j);
+        if(krw&&krw>500&&krw<5000)return krw;
+        throw new Error("invalid value");
+      }catch(e){clearTimeout(timer);throw e;}
+    };
     try{
-      const url="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
-      const proxyUrl=`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-      const res=await fetch(proxyUrl);
-      if(!res.ok)throw new Error("HTTP "+res.status);
-      const j=await res.json();
-      const contents=j?.contents;
-      if(!contents)throw new Error("no contents");
-      const meta=JSON.parse(contents)?.chart?.result?.[0]?.meta;
-      const krw=meta?.regularMarketPrice;
-      if(krw&&krw>500&&krw<5000){
-        const rounded=Math.round(krw);
-        setFxRate(rounded);
-        fxRateRef.current=rounded;
-        setFxAuto(true);
-        setFxTime(new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));
-        return rounded;
-      }
+      const krw=await Promise.any([
+        tryProxy(
+          `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`,
+          j=>JSON.parse(j?.contents||"{}")?.chart?.result?.[0]?.meta?.regularMarketPrice
+        ),
+        tryProxy(
+          `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`,
+          j=>j?.chart?.result?.[0]?.meta?.regularMarketPrice
+        ),
+      ]);
+      return applyFx(krw);
     }catch{}
-    // 방법2: 백업 API
-    try{
-      const proxyUrl2=`https://api.allorigins.win/get?url=${encodeURIComponent("https://api.exchangerate.host/live?access_key=free&currencies=KRW&source=USD")}`;
-      const res2=await fetch(proxyUrl2);
-      const j2=await res2.json();
-      const data=JSON.parse(j2?.contents||"{}");
-      const krw2=data?.quotes?.USDKRW;
-      if(krw2&&krw2>500&&krw2<5000){
-        const rounded2=Math.round(krw2);
-        setFxRate(rounded2);
-        fxRateRef.current=rounded2;
-        setFxAuto(true);
-        setFxTime(new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));
-        return rounded2;
-      }
-    }catch{}
-    return null; // 조회 실패
+    return null;
   },[]);
 
   /* ★ 시세 조회 (ETF/주식) + 환율 동시 실행 */
@@ -546,39 +833,71 @@ function App(){
     const tickers=new Set();
     Object.entries(hMap).forEach(([aid,list])=>{
       const ac=ACCOUNTS.find(a=>a.id===aid);
-      if(ac?.directInput)return;
+      if(ac?.directInput||ac?.cmaType)return; // CMA는 자체계산, 시세조회 불필요
       (list||[]).forEach(h=>{
         if(!h.ticker||!AUTO_TYPES.includes(h.assetType))return;
         tickers.add(h.assetType==="국내ETF"?h.ticker+".KS":h.ticker);
       });
     });
 
-    // ★ 환율 먼저 조회 → 새 환율값으로 주식시세 계산에 즉시 반영
-    const newFx = await fetchFxRate(); // 새 환율 (실패시 null)
-
-    // 주식 시세 조회
-    const newP={};
-    if(tickers.size>0){
-      await Promise.allSettled([...tickers].map(async tk=>{
+    // ★ 단일 종목 시세 조회 - 두 프록시를 동시에 요청, 먼저 오는 것 사용 (속도 최대화)
+    const fetchOneTicker=async(tk)=>{
+      const yahooUrl=`https://query1.finance.yahoo.com/v8/finance/chart/${tk}?interval=1d&range=1d`;
+      const parseYahoo=(j)=>{
         try{
-          const url=`https://query1.finance.yahoo.com/v8/finance/chart/${tk}?interval=1d&range=1d`;
-          const res=await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`);
-          const j=await res.json();
-          const meta=JSON.parse(j.contents)?.chart?.result?.[0]?.meta;
-          if(meta?.regularMarketPrice){
-            newP[tk]={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
-          }
+          const raw=j?.contents?JSON.parse(j.contents):j;
+          const meta=raw?.chart?.result?.[0]?.meta;
+          if(meta?.regularMarketPrice)
+            return{price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
         }catch{}
-      }));
-    }
+        return null;
+      };
+      // 두 프록시 동시 요청 - 먼저 성공한 것 사용
+      const tryProxy=async(proxyUrl)=>{
+        const ctrl=new AbortController();
+        const timer=setTimeout(()=>ctrl.abort(),7000);
+        try{
+          const res=await fetch(proxyUrl,{signal:ctrl.signal});
+          clearTimeout(timer);
+          const j=await res.json();
+          const result=parseYahoo(j);
+          if(result)return result;
+          throw new Error("no data");
+        }catch(e){clearTimeout(timer);throw e;}
+      };
+      try{
+        return await Promise.any([
+          tryProxy(`https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`),
+          tryProxy(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`),
+        ]);
+      }catch{return null;}
+    };
+
+    const allTickers=[...tickers];
+    // ★ 5개씩 배치 처리 - 브라우저 연결 throttling 방지
+    const BATCH=5;
+    const batches=[];
+    for(let i=0;i<allTickers.length;i+=BATCH) batches.push(allTickers.slice(i,i+BATCH));
+
+    // 환율 + 첫 배치 동시 시작
+    const newP={};
+    const processBatch=async(batch)=>{
+      const results=await Promise.allSettled(batch.map(tk=>fetchOneTicker(tk)));
+      results.forEach((r,i)=>{if(r?.status==="fulfilled"&&r.value)newP[batch[i]]=r.value;});
+    };
+
+    // 환율과 모든 배치 병렬 실행
+    await Promise.all([
+      fetchFxRate(),
+      (async()=>{for(const batch of batches)await processBatch(batch);})()
+    ]);
 
     if(Object.keys(newP).length>0){
-      setPrices(prev=>({...prev,...newP}));
-    }
-    // ★ 환율 갱신 성공시 토스트로 알림
-    if(newFx){
-      // fxRate state는 이미 fetchFxRate 내부에서 setFxRate로 업데이트됨
-      // React state 업데이트는 비동기이므로 calcH는 다음 렌더에서 새 환율 반영
+      setPrices(prev=>{
+        const next={...prev,...newP};
+        sv(SK_PRICES,next); // ★ 시세 캐시 저장 → 다음 앱 시작시 즉시 복원
+        return next;
+      });
     }
     setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
     setCountdown(600);setFetching(false);
@@ -586,8 +905,10 @@ function App(){
 
   // eslint-disable-next-line
   useEffect(()=>{
-    fetchFxRate();                    // ★ 앱 시작시 환율 즉시 조회
-    fetchPrices(holdingsRef.current); // 시세 조회
+    // ★ 캐시 복원은 useState 초기값에서 이미 완료
+    // 백그라운드에서 최신 시세 갱신 (약간 딜레이 후 시작 - UI 먼저 그리기)
+    const t=setTimeout(()=>fetchPrices(holdingsRef.current), 200);
+    return()=>clearTimeout(t);
   },[]);
   useEffect(()=>{
     const t=setInterval(()=>setCountdown(c=>{if(c<=1){fetchPrices(holdingsRef.current);return 600;}return c-1;}),1000);
@@ -598,6 +919,7 @@ function App(){
   const calcH=useCallback((h,aid,snap,fx)=>{
     const ac=ACCOUNTS.find(a=>a.id===aid),pr=snap||prices,rate=fx||fxRateRef.current||fxRate;
     if(ac?.directInput){const inv=parseFloat(h.principal)||0,cur=parseFloat(h.evalAmount)||0,pnl=cur-inv,p=inv>0?pnl/inv*100:0;return{...h,invested:inv,current:cur,pnl,pct:p,pInfo:null,dayChg:null,calcMode:"direct"};}
+    if(h.assetType==="CMA"&&h.startDate&&h.rate&&h.principal){const c=calcCMA(h);if(c)return{...h,...c,pInfo:null,dayChg:null,calcMode:"cma"};}
     if(h.assetType==="적금"&&h.startDate&&h.rate){const s=calcSavings(h);if(s)return{...h,...s,pInfo:null,dayChg:null,calcMode:"savings"};}
     if(h.assetType==="펀드"&&h.nav&&h.qty){const f=calcFund(h);if(f)return{...h,...f,pInfo:null,dayChg:null,calcMode:"fund"};}
     const pk=h.ticker?(h.assetType==="국내ETF"?h.ticker+".KS":h.ticker):"";
@@ -635,16 +957,47 @@ function App(){
   /* CRUD */
   const openAdd=useCallback(()=>{
     const ac=ACCOUNTS.find(a=>a.id===acctTab);
-    const dt=ac.types.every(t=>t.includes("미국"))?"미국주식":ac.types[0];
+    // CMA 계좌는 assetType="CMA" 고정
+    const dt=ac.cmaType?"CMA":ac.types.every(t=>t.includes("미국"))?"미국주식":ac.types[0];
     setForm({_acctId:acctTab,assetType:dt,currency:dt.includes("미국")?"USD":"KRW"});
     setEditIdx(null);setModal("holding");
   },[acctTab]);
-  const openEdit=useCallback((aid,idx)=>{setForm({...holdings[aid][idx],_acctId:aid});setEditIdx(idx);setModal("holding");},[holdings]);
+  // ★ 모달 열릴때 해당 티커 즉시 단독 조회 → 미리보기 즉시 표시
+  // ★ 단일 티커 즉시 조회 (모달 열릴때, 항상 최신 시세)
+  const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
+    if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
+    const tk=assetType==="국내ETF"?ticker+".KS":ticker;
+    try{
+      const ctrl=new AbortController();
+      const timer=setTimeout(()=>ctrl.abort(),8000);
+      const url=`https://query1.finance.yahoo.com/v8/finance/chart/${tk}?interval=1d&range=1d`;
+      const res=await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,{signal:ctrl.signal});
+      clearTimeout(timer);
+      const j=await res.json();
+      const meta=JSON.parse(j.contents)?.chart?.result?.[0]?.meta;
+      if(meta?.regularMarketPrice){
+        const pInfo={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
+        setPrices(prev=>{const next={...prev,[tk]:pInfo};sv(SK_PRICES,next);return next;});
+      }
+    }catch{}
+  },[]);
+
+  const openEdit=useCallback((aid,idx)=>{
+    const h=holdings[aid][idx];
+    setForm({...h,_acctId:aid});
+    setEditIdx(idx);
+    setModal("holding");
+    // ★ 모달 열자마자 해당 종목 시세 즉시 조회
+    if(h.ticker&&AUTO_TYPES.includes(h.assetType)){
+      fetchSingleTicker(h.ticker,h.assetType);
+    }
+  },[holdings,fetchSingleTicker]);
   const saveHolding=useCallback(()=>{
     if(!form.name?.trim()){showToast("종목명을 입력해주세요.","error");return;}
     const aid=form._acctId,ac=ACCOUNTS.find(a=>a.id===aid);
     let entry;
     if(ac?.directInput){entry={name:form.name.trim(),assetType:form.assetType||ac.types[0],principal:form.principal||"0",evalAmount:form.evalAmount||"0",memo:form.memo||""};}
+    else if(form.assetType==="CMA"){if(!form.startDate){showToast("기산일을 입력해주세요.","error");return;}if(!form.principal||parseFloat(form.principal)<=0){showToast("원금을 입력해주세요.","error");return;}entry={name:form.name.trim(),assetType:"CMA",principal:form.principal||"0",rate:form.rate||"0",startDate:form.startDate,memo:form.memo||""};}
     else if(form.assetType==="적금"){if(!form.startDate){showToast("가입일을 입력해주세요.","error");return;}entry={name:form.name.trim(),assetType:"적금",principal:form.principal||"0",rate:form.rate||"0",startDate:form.startDate,memo:form.memo||""};}
     else if(form.assetType==="펀드"){entry={name:form.name.trim(),assetType:"펀드",nav:form.nav||"0",qty:form.qty||"0",avgNav:form.avgNav||"0",memo:form.memo||""};}
     else{entry={name:form.name.trim(),ticker:(form.ticker||"").toUpperCase().trim(),assetType:form.assetType||ac.types[0],currency:form.currency||"KRW",qty:form.qty||"0",avgPrice:form.avgPrice||"0",currentPrice:form.currentPrice||"",memo:form.memo||""};}
@@ -652,7 +1005,7 @@ function App(){
     if(editIdx!==null)list[editIdx]=entry;else list.push(entry);
     const next={...holdings,[aid]:list};
     setHoldings(next);holdingsRef.current=next;
-    if(!ac?.directInput&&entry.assetType!=="적금"&&entry.assetType!=="펀드")fetchPrices(next);
+    if(!ac?.directInput&&!ac?.cmaType&&entry.assetType!=="적금"&&entry.assetType!=="펀드"&&entry.assetType!=="CMA")fetchPrices(next);
     setModal(null);setForm({});setEditIdx(null);
     showToast(editIdx!==null?"수정 완료!":"종목 추가 완료!");
   },[form,editIdx,holdings,fetchPrices,showToast]);
@@ -693,6 +1046,7 @@ function App(){
   /* ★ 카드 상세 - 미국주식/ETF는 달러+원화 동시 표시 */
   const cardDet=(h,ac)=>{
     if(ac.directInput)return[["투자원금",won(h.invested)],["평가금액",won(h.current)],["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]];
+    if(h.calcMode==="cma")return[["원금",won(h.principal)],["경과",`${h.days||0}일`],["일이자",`+${won(h.dailyInterest)}`]];
     if(h.calcMode==="savings")return[["원금",won(h.principal)],["경과",`${h.days||0}일`],["이자",`+${won(h.pnl)}`]];
     if(h.calcMode==="fund")return[["보유좌수",nf(h.qty)],["기준가",`${nf(parseFloat(h.nav||0).toFixed(2))}원`],["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]];
     // ★ 미국주식/ETF: 달러+원화 동시
@@ -749,7 +1103,7 @@ function App(){
           <span style={{fontSize:11,color:C.muted,whiteSpace:"nowrap"}}>{fetching?"⏳ 갱신중...":`🔄 ${mins}:${secs}`}</span>
           <button onClick={()=>fetchPrices(holdingsRef.current)} style={{minHeight:36,padding:"0 12px",background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.accent,fontSize:12}}>지금</button>
         </div>
-        {lastUp&&<div style={{fontSize:11,color:C.muted,marginTop:3}}>시세: {lastUp} · ETF·주식·환율 자동 / 펀드 기준가 / 적금 자동계산</div>}
+        <div style={{fontSize:11,color:C.muted,marginTop:3}}>{lastUp?`시세: ${lastUp}`:"⏳ 시세 갱신 중..."} · ETF·주식·환율 자동 / 펀드·CMA·적금 자동계산</div>
         <div style={{display:"flex",gap:8,marginTop:12}}>
           <button onClick={exportData} style={{flex:1,minHeight:44,background:C.card2,border:`1px solid ${C.border}`,borderRadius:12,color:"#a78bfa",fontSize:13,fontWeight:700}}>💾 백업</button>
           <label style={{flex:1,minHeight:44,display:"flex",alignItems:"center",justifyContent:"center",background:C.card2,border:`1px solid ${C.border}`,borderRadius:12,color:C.green,fontSize:13,fontWeight:700,cursor:"pointer"}}>
@@ -761,9 +1115,9 @@ function App(){
 
       {/* 탭 */}
       <div style={{display:"flex",background:C.card,borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,zIndex:10}}>
-        {[["dash","📊","대시보드"],["accounts","💼","계좌별"],["ai","🤖","AI분석"]].map(([k,e,v])=>(
-          <button key={k} onClick={()=>setTab(k)} style={{flex:1,minHeight:58,padding:"8px 0 10px",fontSize:11,fontWeight:700,background:"none",border:"none",color:tab===k?C.accent:C.muted,borderBottom:tab===k?`2px solid ${C.accent}`:"2px solid transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-            <span style={{fontSize:21}}>{e}</span>{v}
+        {[["dash","📊","대시보드"],["accounts","💼","계좌별"],["graph","📈","그래프"],["ai","🤖","AI"]].map(([k,e,v])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{flex:1,minHeight:54,padding:"7px 0 9px",fontSize:10,fontWeight:700,background:"none",border:"none",color:tab===k?C.accent:C.muted,borderBottom:tab===k?`2px solid ${C.accent}`:"2px solid transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+            <span style={{fontSize:19}}>{e}</span>{v}
           </button>
         ))}
       </div>
@@ -828,6 +1182,7 @@ function App(){
             {!curAcct.directInput&&(<div style={{background:C.card2,borderRadius:10,padding:"10px 14px",border:`1px solid ${C.border}`,marginBottom:12,fontSize:12,color:C.sub,lineHeight:1.7}}>
               🔄 <b style={{color:C.text}}>ETF·주식</b>: 티커 입력 → 자동시세 (10~20분지연)<br/>
               📊 <b style={{color:C.text}}>펀드</b>: 기준가 입력 → 평가금액 자동계산<br/>
+              💳 <b style={{color:"#06b6d4"}}>CMA</b>: 원금+연이율+기산일 → 이자 매일 자동계산<br/>
               💰 <b style={{color:C.text}}>적금</b>: 원금+금리+가입일 → 이자 매일 자동계산
             </div>)}
             {curData.list.length===0&&(<div style={{textAlign:"center",padding:"44px 0",color:C.muted}}>
@@ -844,6 +1199,7 @@ function App(){
                       <span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.assetType}</span>
                       {!curAcct.directInput&&h.ticker&&<span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.ticker}</span>}
                       {h.calcMode==="auto"&&h.pInfo&&<span style={{color:C.green,fontWeight:600}}>● 자동 {h.pInfo.time}</span>}
+                      {h.calcMode==="cma"&&<span style={{color:"#06b6d4",fontWeight:600}}>💳 CMA 이자 자동계산</span>}
                       {h.calcMode==="savings"&&<span style={{color:"#fb923c",fontWeight:600}}>💰 이자 자동계산</span>}
                       {h.calcMode==="fund"&&<span style={{color:C.green,fontWeight:600}}>📊 기준가 방식</span>}
                       {h.calcMode==="manual"&&!curAcct.directInput&&!h.ticker&&<span style={{color:"#f59e0b"}}>✏️ 수동</span>}
@@ -920,9 +1276,9 @@ function App(){
       {/* 하단 네비 + 스와이프 인디케이터 */}
       <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"rgba(7,14,28,0.97)",backdropFilter:"blur(12px)",borderTop:`1px solid ${C.border}`,zIndex:20,paddingBottom:"env(safe-area-inset-bottom,0px)"}}>
         <div style={{display:"flex"}}>
-          {[["dash","📊","대시보드"],["accounts","💼","계좌별"],["ai","🤖","AI분석"]].map(([k,e,v])=>(
-            <button key={k} onClick={()=>setTab(k)} style={{flex:1,minHeight:58,padding:"8px 0 10px",fontSize:11,fontWeight:700,background:"none",border:"none",color:tab===k?C.accent:C.muted,borderBottom:tab===k?`2px solid ${C.accent}`:"2px solid transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-              <span style={{fontSize:21}}>{e}</span>{v}
+          {[["dash","📊","대시보드"],["accounts","💼","계좌별"],["graph","📈","그래프"],["ai","🤖","AI"]].map(([k,e,v])=>(
+            <button key={k} onClick={()=>setTab(k)} style={{flex:1,minHeight:54,padding:"7px 0 9px",fontSize:10,fontWeight:700,background:"none",border:"none",color:tab===k?C.accent:C.muted,borderBottom:tab===k?`2px solid ${C.accent}`:"2px solid transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+              <span style={{fontSize:19}}>{e}</span>{v}
             </button>
           ))}
         </div>
@@ -933,7 +1289,7 @@ function App(){
       </div>
 
       {/* 모달들 */}
-      <FormModal show={modal==="holding"} form={form} setForm={setForm} editIdx={editIdx} mAcct={mAcct} prices={prices} fxRate={fxRate} onSave={saveHolding} onClose={()=>setModal(null)}/>
+      <FormModal show={modal==="holding"} form={form} setForm={setForm} editIdx={editIdx} mAcct={mAcct} prices={prices} fxRate={fxRate} onSave={saveHolding} onClose={()=>setModal(null)} onFetchTicker={fetchSingleTicker}/>
       <SettingsModal show={modal==="settings"} fxRate={fxRate} fxAuto={fxAuto} fxTime={fxTime} setFxRate={setFxRate} onClose={()=>setModal(null)} showToast={showToast} onFetchFx={fetchFxRate}/>
       {modal==="confirm"&&confirmCb&&(<ConfirmModal msg="이 종목을 삭제할까요? 삭제 후 복구가 어렵습니다." onOk={confirmCb.fn} onCancel={()=>{setModal(null);setConfirmCb(null);}}/>)}
     </div>
