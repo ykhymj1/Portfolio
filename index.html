@@ -1040,17 +1040,16 @@ function App(){
     const pNaverFx=raw=>{
       try{
         const d=(raw?.contents)?JSON.parse(raw.contents):raw;
-        // polling API: datas 배열
+        // ★ 쉼표 제거 필수
+        const toNum=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
+        // polling API: { datas:[{ nv:현재환율(숫자), sv:전일종가 }] }
         if(d?.datas?.[0]){
           const s=d.datas[0];
-          const v=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||s.rate||0);
+          const v=toNum(s.nv||s.closePrice||s.currentPrice||s.rate||s.last);
           if(isValid(v))return Math.round(v);
         }
-        // basic/forex API: 직접 필드
-        const v=parseFloat(
-          d?.closePrice||d?.currentPrice||d?.rate||
-          d?.basePrice||d?.value||d?.krw||0
-        );
+        // basic/forex API
+        const v=toNum(d?.closePrice||d?.currentPrice||d?.rate||d?.basePrice||d?.value||d?.krw);
         if(isValid(v))return Math.round(v);
       }catch(e){}
       return null;
@@ -1145,24 +1144,25 @@ function App(){
     // ── 국내ETF: 네이버 증권 API (allorigins 경유) ──
     const fetchKR=async(ticker)=>{
       const code=ticker.replace(".KS","");
-      // 네이버 증권 시세 API
       const naverUrl="https://m.stock.naver.com/api/stock/"+code+"/basic";
-      const naverUrl2="https://finance.naver.com/item/sise_day.nhn?code="+code+"&page=1";
       const naverQuote="https://polling.finance.naver.com/api/realtime/domestic/stock/"+code;
+
+      // ★ 핵심: 네이버는 숫자에 쉼표 포함 "32,450" → 쉼표 제거 필수
+      const toNum=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
 
       const pNaver=raw=>{
         try{
           const d=(raw?.contents)?JSON.parse(raw.contents):raw;
-          // polling API 형태
+          // polling API: { datas:[{ nv:현재가(숫자), sv:전일종가, cv:전일대비, cr:등락률 }] }
           if(d?.datas?.[0]){
             const s=d.datas[0];
-            const price=parseFloat(s.closePrice||s.currentPrice||s.nv||0);
-            const prev=parseFloat(s.openPrice||s.sv||price);
+            const price=toNum(s.nv||s.closePrice||s.currentPrice);
+            const prev=toNum(s.sv||s.openPrice||price);
             if(price>0)return{price,prev,currency:"KRW",time:now()};
           }
-          // basic API 형태
-          const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||0);
-          const prev=parseFloat(d?.openPrice||d?.basePrice||price);
+          // basic API: { closePrice:"32,450"(전일종가), currentPrice:"32,600"(현재가) }
+          const price=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice);
+          const prev=toNum(d?.basePrice||d?.closePrice||price);
           if(price>0)return{price,prev,currency:"KRW",time:now()};
         }catch(e){}
         return null;
@@ -1234,16 +1234,18 @@ function App(){
       const pNaverWorld=raw=>{
         try{
           const d=(raw?.contents)?JSON.parse(raw.contents):raw;
-          // polling API 형태
+          // ★ 쉼표 제거 필수
+          const toNum=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
+          // polling API: { datas:[{ nv:현재가, sv:전일종가 }] }
           if(d?.datas?.[0]){
             const s=d.datas[0];
-            const price=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||0);
-            const prev=parseFloat(s.openPrice||s.sv||s.open||price);
+            const price=toNum(s.nv||s.closePrice||s.currentPrice||s.last);
+            const prev=toNum(s.sv||s.openPrice||s.open||price);
             if(price>0)return{price,prev,currency:"USD",time:now()};
           }
-          // basic/integration API 형태
-          const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||d?.last||0);
-          const prev=parseFloat(d?.openPrice||d?.basePrice||d?.open||price);
+          // basic/integration API
+          const price=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice||d?.last);
+          const prev=toNum(d?.basePrice||d?.closePrice||d?.open||price);
           if(price>0)return{price,prev,currency:"USD",time:now()};
         }catch(e){}
         return null;
@@ -1442,10 +1444,12 @@ function App(){
     };
     const pV8=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:isKR?"KRW":m.currency||"USD",time:now()};}catch(e){}return null;};
     const pV7=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:isKR?"KRW":q.currency||"USD",time:now()};}catch(e){}return null;};
+    // ★ 쉼표 제거 필수 - 네이버는 "32,450" 형태로 반환
+    const toNum=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
     // 국내 네이버 파싱
-    const pNaverKR=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=parseFloat(s.closePrice||s.currentPrice||s.nv||0);const prev=parseFloat(s.openPrice||s.sv||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||0);const prev=parseFloat(d?.openPrice||d?.basePrice||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}catch(e){}return null;};
+    const pNaverKR=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=toNum(s.nv||s.closePrice||s.currentPrice);const prev=toNum(s.sv||s.openPrice||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}const price=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice);const prev=toNum(d?.basePrice||d?.closePrice||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}catch(e){}return null;};
     // 해외 네이버 파싱
-    const pNaverUS=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||0);const prev=parseFloat(s.openPrice||s.sv||s.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||d?.last||0);const prev=parseFloat(d?.openPrice||d?.basePrice||d?.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}catch(e){}return null;};
+    const pNaverUS=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=toNum(s.nv||s.closePrice||s.currentPrice||s.last);const prev=toNum(s.sv||s.openPrice||s.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}const price=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice||d?.last);const prev=toNum(d?.basePrice||d?.closePrice||d?.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}catch(e){}return null;};
 
     const save=r=>{setPrices(prev=>{const next={...prev,[storeKey]:r};sv(SK_PRICES,next);return next;});};
 
