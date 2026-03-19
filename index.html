@@ -1192,24 +1192,26 @@ function App(){
       };
 
       const sources=[
-        // 네이버 polling (가장 안정적)
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverQuote),7000)
+        // 네이버 polling — allorigins
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverQuote),6000)
           .then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
-        // 네이버 basic
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverUrl),7000)
+        // 네이버 basic — corsproxy
+        tf("https://corsproxy.io/?url="+encodeURIComponent(naverUrl),7000)
           .then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?url="+encodeURIComponent(naverUrl),8000)
+        // 네이버 basic — codetabs (다른 프록시)
+        tf("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(naverUrl),7000)
           .then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
-        // Yahoo Finance .KS (백업)
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl),8000)
+        // Yahoo .KS — allorigins
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl),7000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),8000)
-          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl),8000)
+        // Yahoo .KS v7 — corsproxy
+        tf("https://corsproxy.io/?url="+encodeURIComponent(qUrl),8000)
           .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl),9000)
+        // Yahoo .KS — thingproxy
+        tf("https://thingproxy.freeboard.io/fetch/"+yUrl,9000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://thingproxy.freeboard.io/fetch/"+yUrl,10000)
+        // Yahoo .KS2 — corsproxy
+        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl2),9000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
       ];
       try{const res=await Promise.any(sources);return res;}
@@ -1222,82 +1224,87 @@ function App(){
       }
     };
 
-    // ── 미국주식/ETF: Yahoo Finance (다중 프록시) ──
-    // ── 미국주식/ETF: 네이버 해외 주식 API 우선 + Yahoo Finance 백업 ──
+    // ── 미국주식/ETF: 구글 파이낸스 1순위 + Yahoo 분산 백업 ──
     const fetchUS=async(ticker)=>{
-      // 네이버 해외 주식 실시간 API
-      const naverRealtimeUrl="https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker;
-      const naverWorldUrl="https://m.stock.naver.com/api/stock/"+ticker+"/basic";
-      const naverWorldUrl2="https://m.stock.naver.com/api/stock/"+ticker+"/integration";
+      // ★ 구글 파이낸스 JSON API (CORS 프록시 경유)
+      const gUrl="https://www.google.com/finance/quote/"+ticker+":NASDAQ";
+      const gUrl2="https://www.google.com/finance/quote/"+ticker+":NYSE";
+      const gUrl3="https://www.google.com/finance/quote/"+ticker+":NYSEARCA"; // ETF
 
-      // 네이버 해외주식 응답 파싱
-      const pNaverWorld=raw=>{
+      // 구글 파이낸스 HTML에서 가격 파싱
+      const pGoogle=raw=>{
         try{
-          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
-          // ★ 쉼표 제거 필수
-          const toNum=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
-          // polling API: { datas:[{ nv:현재가, sv:전일종가 }] }
-          if(d?.datas?.[0]){
-            const s=d.datas[0];
-            const price=toNum(s.nv||s.closePrice||s.currentPrice||s.last);
-            const prev=toNum(s.sv||s.openPrice||s.open||price);
-            if(price>0)return{price,prev,currency:"USD",time:now()};
+          const txt=(raw?.contents)?raw.contents:
+                    (typeof raw==="string"?raw:null);
+          if(!txt)return null;
+          // 구글 파이낸스 HTML 내 가격 패턴
+          // data-last-price="185.75" 또는 jsname="ip75Ub">185.75
+          let m=txt.match(/data-last-price="([0-9.,]+)"/);
+          if(!m)m=txt.match(/jsname="ip75Ub">([0-9.,]+)</);
+          if(!m)m=txt.match(/"regularMarketPrice"[^>]*>([0-9.,]+)/);
+          if(!m)m=txt.match(/\$([0-9]+\.[0-9]+)/);
+          if(m){
+            const price=parseFloat(m[1].replace(/,/g,""));
+            if(price>0)return{price,prev:price,currency:"USD",time:now()};
           }
-          // basic/integration API
-          const price=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice||d?.last);
-          const prev=toNum(d?.basePrice||d?.closePrice||d?.open||price);
-          if(price>0)return{price,prev,currency:"USD",time:now()};
         }catch(e){}
         return null;
       };
 
-      // Yahoo Finance 백업
-      const yUrl1="https://query1.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
-      const yUrl2="https://query2.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
-      const qUrl1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
-      const qUrl2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
+      // Yahoo Finance 파서
+      const pV8=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"USD",time:now()};}catch(e){}return null;};
+      const pV7=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"USD",time:now()};}catch(e){}return null;};
 
-      const pV8=raw=>{
-        try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;
-          if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"USD",time:now()};}catch(e){}return null;};
-      const pV7=raw=>{
-        try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];
-          if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"USD",time:now()};}catch(e){}return null;};
+      const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
+      const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
+      const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
+
+      // ★ 프록시를 분산 — 각 소스마다 다른 프록시 사용
+      const proxies=[
+        "https://api.allorigins.win/get?url=",
+        "https://corsproxy.io/?url=",
+        "https://corsproxy.io/?",
+        "https://api.codetabs.com/v1/proxy?quest=",
+        "https://thingproxy.freeboard.io/fetch/",
+      ];
 
       const sources=[
-        // ★ 네이버 해외 주식 실시간 (1순위)
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverRealtimeUrl),6000)
-          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?url="+encodeURIComponent(naverRealtimeUrl),7000)
-          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(naverRealtimeUrl),7000)
-          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-        // ★ 네이버 basic API
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverWorldUrl),7000)
-          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverWorldUrl2),7000)
-          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-        // Yahoo Finance 병렬 백업
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),8000)
+        // ★ 구글 파이낸스 (NASDAQ/NYSE/ETF 순서로 시도)
+        tf(proxies[0]+encodeURIComponent(gUrl),7000)
+          .then(j=>{const r=pGoogle(j);if(!r)throw 0;return r;}),
+        tf(proxies[1]+encodeURIComponent(gUrl2),7000)
+          .then(j=>{const r=pGoogle(j);if(!r)throw 0;return r;}),
+        tf(proxies[2]+encodeURIComponent(gUrl3),7000)
+          .then(j=>{const r=pGoogle(j);if(!r)throw 0;return r;}),
+        // Yahoo v8 — 각각 다른 프록시
+        tf(proxies[0]+encodeURIComponent(y1),7000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),8000)
+        tf(proxies[1]+encodeURIComponent(y1),8000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),8000)
-          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl2),8000)
-          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000)
+        tf(proxies[4]+y1,8000)
           .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl1),9000)
+        // Yahoo v7 — 다른 프록시
+        tf(proxies[0]+encodeURIComponent(q1),7000)
           .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf(proxies[2]+encodeURIComponent(q1),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf(proxies[3]+encodeURIComponent(y2),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // 네이버 해외 백업
+        tf(proxies[0]+encodeURIComponent("https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker),8000)
+          .then(j=>{
+            try{const d=(j?.contents)?JSON.parse(j.contents):j;const toN=s=>parseFloat(String(s||0).replace(/,/g,""))||0;
+              if(d?.datas?.[0]){const s=d.datas[0];const p=toN(s.nv||s.currentPrice);if(p>0)return{price:p,prev:toN(s.sv||p),currency:"USD",time:now()};}
+            }catch(e){}throw 0;
+          }),
       ];
-      try{const res=await Promise.any(sources);return res;}
+
+      try{return await Promise.any(sources);}
       catch(e){
-        await new Promise(res=>setTimeout(res,2000));
+        await new Promise(r=>setTimeout(r,1500));
         try{return await Promise.any([
-          tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverRealtimeUrl),10000).then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
-          tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-          tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+          tf(proxies[0]+encodeURIComponent(y1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+          tf(proxies[1]+encodeURIComponent(q1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
         ]);}catch(e2){return null;}
       }
     };
@@ -1699,24 +1706,28 @@ function App(){
                         <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                           <span style={{fontSize:16}}>{ac.icon}</span>
                           <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
-                          {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
+                          {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동계좌</span>}
                           {ac.pensionHint&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>퇴직연금</span>}
                         </div>
                         <div style={{fontSize:12,color:C.muted,marginTop:3}}>
-                          {(ac.list||[]).length}종목 · 투자금 {won(myInv)}
-                          {ac.shared&&<span style={{color:"#f59e0b"}}> (내 1/2)</span>}
+                          {(ac.list||[]).length}종목 · 투자금 {won(ac.shared?ac.invested:myInv)}
                         </div>
-                        {/* AMT/AMT CMA: 계좌 총액도 함께 표시 */}
-                        {ac.shared&&(
-                          <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-                            계좌 총액 <b style={{color:C.sub}}>{won(ac.current)}</b>
-                          </div>
-                        )}
                       </div>
                       <div style={{textAlign:"right",flexShrink:0}}>
-                        <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
-                        {ac.shared&&<div style={{fontSize:11,color:"#f59e0b",marginTop:1}}>내 몫 1/2</div>}
-                        <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
+                        {ac.shared?(
+                          <>
+                            {/* AMT: 계좌 총액 크게 + 내 몫 작게 */}
+                            <div style={{fontSize:11,color:"#f59e0b",marginBottom:1}}>계좌 총액</div>
+                            <div style={{fontSize:17,fontWeight:800,color:C.text}}>{won(ac.current)}</div>
+                            <div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>내 몫 {won(myCur)}</div>
+                            <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
+                          </>
+                        ):(
+                          <>
+                            <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
+                            <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
+                          </>
+                        )}
                       </div>
                     </div>
                     <MiniBar pct={ac.pct}/>
