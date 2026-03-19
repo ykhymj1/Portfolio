@@ -875,7 +875,12 @@ function App(){
   const[fxTime,setFxTime]=useState(()=>{
     try{ const c=JSON.parse(localStorage.getItem(SK_FX)||"{}"); return c.time||null; }catch(e){ return null; }
   });
-  const[prices,setPrices]=useState(()=>ld(SK_PRICES,{})); // ★ 캐시에서 즉시 복원
+  const[prices,setPrices]=useState(()=>{
+    // 캐시 복원 시 time 필드 제거 (오래된 시간 표시 방지)
+    const cached=ld(SK_PRICES,{});
+    Object.keys(cached).forEach(k=>{if(cached[k])delete cached[k].time;});
+    return cached;
+  }); // ★ 캐시에서 즉시 복원 (시간 제거)
   const[fetching,setFetching]=useState(false);
   const[countdown,setCountdown]=useState(600);
   const[lastUp,setLastUp]=useState(null);
@@ -996,39 +1001,55 @@ function App(){
       });
     });
 
-    // ★ 단일 종목 시세 조회 - 타임아웃 10초, allorigins→codetabs 순차
+    // ★ 단일 종목 시세 조회: 3개 프록시 × 2개 Yahoo도메인 순차 시도
     const fetchOneTicker=async(tk)=>{
-      const yahooUrl="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      const parseYahoo=(j)=>{
+      const now=new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
+      const parseYahoo=(text)=>{
         try{
-          const raw=j&&j.contents?JSON.parse(j.contents):j;
-          const res=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0];
-          const meta=res&&res.meta;
+          const j=JSON.parse(text);
+          const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
           if(meta&&meta.regularMarketPrice)
-            return{price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
+            return{price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:now};
         }catch(e){}
         return null;
       };
-      const fetchT=async(url,ms)=>{
+      // 프록시 wrapping된 응답 파싱
+      const parseWrapped=(text)=>{
+        try{
+          const j=JSON.parse(text);
+          // allorigins: {contents: "..."}
+          const inner=j&&j.contents?j.contents:text;
+          return parseYahoo(inner);
+        }catch(e){}
+        return null;
+      };
+      const doFetch=async(url,ms)=>{
         const ctrl=new AbortController();
         const t=setTimeout(()=>ctrl.abort(),ms);
-        try{const r=await fetch(url,{signal:ctrl.signal});clearTimeout(t);return r;}
-        catch(e){clearTimeout(t);throw e;}
+        try{
+          const r=await fetch(url,{signal:ctrl.signal});
+          clearTimeout(t);
+          if(!r.ok)throw new Error(r.status);
+          return await r.text();
+        }catch(e){clearTimeout(t);throw e;}
       };
-      // allorigins 먼저 (10초)
-      try{
-        const r=await fetchT("https://api.allorigins.win/get?url="+encodeURIComponent(yahooUrl),10000);
-        const j=await r.json();
-        const result=parseYahoo(j);
-        if(result)return result;
-      }catch(e){}
-      // codetabs 시도 (10초)
-      try{
-        const r=await fetchT("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(yahooUrl),10000);
-        const j=await r.json();
-        const result=parseYahoo(j);
-        if(result)return result;
-      }catch(e){}
+      // 시도 목록: [프록시URL, 파싱함수]
+      const q1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+      const q2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+      const tries=[
+        ["https://api.allorigins.win/get?url="+encodeURIComponent(q1), parseWrapped],
+        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped],
+        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q1), parseYahoo],
+        ["https://corsproxy.io/?"+encodeURIComponent(q1), parseYahoo],
+        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q2), parseYahoo],
+      ];
+      for(var i=0;i<tries.length;i++){
+        try{
+          const text=await doFetch(tries[i][0],10000);
+          const result=tries[i][1](text);
+          if(result)return result;
+        }catch(e){}
+      }
       return null;
     };
 
@@ -1366,7 +1387,8 @@ function App(){
                     <div style={{fontSize:12,color:C.muted,marginTop:4,display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
                       <span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.assetType}</span>
                       {!curAcct.directInput&&h.ticker&&<span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.ticker}</span>}
-                      {h.calcMode==="auto"&&h.pInfo&&<span style={{color:C.green,fontWeight:600}}>● 자동 {h.pInfo.time}</span>}
+                      {h.calcMode==="auto"&&h.pInfo&&h.pInfo.time&&<span style={{color:C.green,fontWeight:600}}>● 자동 {h.pInfo.time}</span>}
+                      {h.calcMode==="auto"&&h.pInfo&&!h.pInfo.time&&<span style={{color:"#f59e0b",fontWeight:600}}>● 캐시데이터</span>}
                       {h.calcMode==="cma"&&<span style={{color:"#06b6d4",fontWeight:600}}>💳 CMA 이자 자동계산</span>}
                       {h.calcMode==="savings"&&<span style={{color:"#fb923c",fontWeight:600}}>💰 이자 자동계산</span>}
                       {h.calcMode==="fund"&&<span style={{color:C.green,fontWeight:600}}>📊 기준가 방식</span>}
