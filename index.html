@@ -304,7 +304,7 @@ const ACCOUNTS=[
   {id:"amt",    label:"AMT 계좌", short:"AMT",  shared:true, color:"#f59e0b",icon:"🤝",types:["국내ETF","미국주식","미국ETF"]},
   {id:"myamt",  label:"My AMT",   short:"MyAMT",shared:false,color:"#60a5fa",icon:"💎",types:["국내ETF","미국주식","미국ETF"]},
   {id:"general",label:"일반계좌", short:"일반", shared:false,color:"#34d399",icon:"📂",types:["미국주식","미국ETF"]},
-  {id:"pension",label:"퇴직연금", short:"퇴직", shared:false,color:"#a78bfa",icon:"🏦",types:["국내ETF","펀드","적금"],directInput:true},
+  {id:"pension",label:"퇴직연금", short:"퇴직", shared:false,color:"#a78bfa",icon:"🏦",types:["국내ETF","펀드","적금"],pensionHint:true},
   {id:"irp",    label:"IRP",      short:"IRP",  shared:false,color:"#fb923c",icon:"🔒",types:["국내ETF","펀드"]},
   {id:"isa",    label:"ISA",      short:"ISA",  shared:false,color:"#f472b6",icon:"🌱",types:["국내ETF","펀드"]},
   {id:"amtcma", label:"AMT CMA",  short:"ACMA", shared:true, color:"#06b6d4",icon:"💳",types:["CMA"],cmaType:true},
@@ -324,8 +324,8 @@ const SK_ITEM_ORDER="pf_item_order"; // 종목 순서 {aid: [idx,...]}
 
 /* ─── 유틸 ─── */
 const toKRW=(n,cur,fx)=>cur==="USD"?n*(fx||DEFAULT_FX):n;
-const won=n=>{const v=parseFloat(n);return(!isFinite(v)||isNaN(v))?"₩0":`₩${Math.round(v).toLocaleString("ko-KR")}`;};
-const pf=n=>{const v=parseFloat(n);if(!isFinite(v)||isNaN(v))return"0.00%";return`${v>=0?"+":""}${v.toFixed(2)}%`;};
+const won=n=>{const v=parseFloat(n);if(!isFinite(v)||isNaN(v))return"₩0";const abs=Math.abs(Math.round(v));return(v<0?"-":"")+"₩"+abs.toLocaleString("ko-KR");};
+const pf=n=>{const v=parseFloat(n);if(!isFinite(v)||isNaN(v))return"0.00%";return`${v>0?"+":v<0?"-":""}${Math.abs(v).toFixed(2)}%`;};
 const usd=n=>{const v=parseFloat(n);return(!isFinite(v)||isNaN(v))?"$0":`$${v.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`;};
 const nf=n=>(n==null||n===""||isNaN(Number(n)))?"—":Number(n).toLocaleString("ko-KR");
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d;}catch(e){return d;}};
@@ -374,7 +374,7 @@ function ProfitBadge({pct:p,pnl,size="md"}){
   const ok=pnl!==undefined&&!isNaN(parseFloat(pnl));
   return(<span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:fs,fontWeight:700,color:col,background:isZero?"#52709620":isUp?C.upBg:C.dnBg,padding:"3px 10px",borderRadius:20,whiteSpace:"nowrap"}}>
     {isZero?"—":isUp?"▲":"▼"} {pf(Math.abs(v))}
-    {ok&&<span style={{opacity:.9}}>· {isUp?"+":""}{won(pnl)}</span>}
+    {ok&&<span style={{opacity:.9}}>· {pnl>=0?"+":""}{won(pnl)}</span>}
   </span>);
 }
 function MiniBar({pct:p}){
@@ -576,11 +576,15 @@ function GraphView({allAccounts,myTotal,myPnl,myPct,history}){
           :<div style={{textAlign:"center",padding:"28px 16px"}}>
             <div style={{fontSize:36,marginBottom:10}}>📈</div>
             <div style={{fontSize:13,color:"#90b0cc",lineHeight:2}}>
-              <b style={{color:"#f0f4f8"}}>2025년 10월 1일</b>부터 수익률 기록<br/>
-              현재 <b style={{color:"#60a5fa"}}>{dataCount}일</b> 데이터 누적<br/>
-              <span style={{fontSize:11,color:"#527a96"}}>
-                {period==="day"?"2일":period==="week"?"7일":period==="month"?"30일":"더 많은 데이터"} 쌓이면 그래프 표시
-              </span>
+              {dataCount===0?(
+                <><b style={{color:"#f0f4f8"}}>오늘부터 수익률 기록 시작!</b><br/>
+                <span style={{fontSize:11,color:"#527a96"}}>매일 앱을 열면 데이터가 쌓여요.<br/>2일 후 1일 그래프, 7일 후 주간 그래프가 나타나요.</span></>
+              ):(
+                <>현재 <b style={{color:"#60a5fa"}}>{dataCount}일</b> 데이터 누적<br/>
+                <span style={{fontSize:11,color:"#527a96"}}>
+                  {period==="day"?"2일 이상":period==="week"?"7일 이상":period==="month"?"30일 이상":"더 많은 데이터"} 쌓이면 그래프 표시
+                </span></>
+              )}
             </div>
           </div>
         }
@@ -922,21 +926,32 @@ function App(){
     touchStartX.current=e.touches[0].clientX;
     touchStartY.current=e.touches[0].clientY;
   },[]);
+  const[pullRefreshing,setPullRefreshing]=useState(false);
   const handleTouchEnd=useCallback((e)=>{
     const dx=touchStartX.current-e.changedTouches[0].clientX;
     const dy=touchStartY.current-e.changedTouches[0].clientY;
-    // 수평 스와이프가 수직보다 클때만 처리 (스크롤 충돌 방지)
-    if(Math.abs(dx)<50||Math.abs(dx)<Math.abs(dy)*1.5)return;
+    // ★ Pull-to-Refresh: 상단 150px에서 아래로 80px 이상 당기면 갱신
+    if(touchStartY.current<150&&dy<-80&&Math.abs(dx)<50){
+      if(!fetching&&!pullRefreshing){
+        setPullRefreshing(true);
+        fetchPrices(holdingsRef.current).finally(()=>setPullRefreshing(false));
+      }
+      return;
+    }
+    // 수평 스와이프 조건 강화: 80px 이상 + 수평이 수직의 2배 이상
+    if(Math.abs(dx)<80||Math.abs(dx)<Math.abs(dy)*2)return;
+    // accounts 탭에서는 스와이프 비활성 (계좌 탭 가로스크롤 충돌)
+    if(tab==="accounts")return;
     const idx=TABS.indexOf(tab);
-    if(dx>0&&idx<TABS.length-1)setTab(TABS[idx+1]); // 왼쪽 스와이프 → 다음탭
-    else if(dx<0&&idx>0)setTab(TABS[idx-1]);         // 오른쪽 스와이프 → 이전탭
-  },[tab]);
+    if(dx>0&&idx<TABS.length-1)setTab(TABS[idx+1]);
+    else if(dx<0&&idx>0)setTab(TABS[idx-1]);
+  },[tab,fetching,pullRefreshing,fetchPrices]);
 
   useEffect(()=>{sv(SK,{holdings,fxRate});},[holdings,fxRate]);
 
   // ★ 매일 수익률 스냅샷 저장 (2025-10-01부터)
   useEffect(()=>{
-    if(!allAccounts.length||myTotal.current===0)return;
+    if(!allAccounts.length)return;
     const today=new Date().toISOString().slice(0,10);
     if(today<GRAPH_START)return;
     try{
@@ -1009,7 +1024,7 @@ function App(){
     const tickers=new Set();
     Object.entries(hMap).forEach(([aid,list])=>{
       const ac=ACCOUNTS.find(a=>a.id===aid);
-      if(ac?.directInput||ac?.cmaType)return; // CMA는 자체계산, 시세조회 불필요
+      if(ac?.cmaType)return; // CMA는 자체계산, 시세조회 불필요
       (list||[]).forEach(h=>{
         if(!h.ticker||!AUTO_TYPES.includes(h.assetType))return;
         tickers.add(h.assetType==="국내ETF"?h.ticker+".KS":h.ticker);
@@ -1107,7 +1122,7 @@ function App(){
   /* 수익 계산 */
   const calcH=useCallback((h,aid,snap,fx)=>{
     const ac=ACCOUNTS.find(a=>a.id===aid),pr=snap||prices,rate=fx||fxRateRef.current||fxRate;
-    if(ac?.directInput){const inv=parseFloat(h.principal)||0,cur=parseFloat(h.evalAmount)||0,pnl=cur-inv,p=inv>0?pnl/inv*100:0;return{...h,invested:inv,current:cur,pnl,pct:p,pInfo:null,dayChg:null,calcMode:"direct"};}
+    if(ac?.directInput||h.assetType==="직접입력"){const inv=parseFloat(h.principal)||0,cur=parseFloat(h.evalAmount)||0,pnl=cur-inv,p=inv>0?pnl/inv*100:0;return{...h,invested:inv,current:cur,pnl,pct:p,pInfo:null,dayChg:null,calcMode:"direct"};}
     if(h.assetType==="CMA"&&h.startDate&&h.rate&&h.principal){const c=calcCMA(h);if(c)return{...h,...c,pInfo:null,dayChg:null,calcMode:"cma"};}
     if(h.assetType==="적금"&&h.startDate&&h.rate){const s=calcSavings(h);if(s)return{...h,...s,pInfo:null,dayChg:null,calcMode:"savings"};}
     if(h.assetType==="펀드"&&h.nav&&h.qty){const f=calcFund(h);if(f)return{...h,...f,pInfo:null,dayChg:null,calcMode:"fund"};}
@@ -1239,7 +1254,7 @@ function App(){
     if(editIdx!==null)list[editIdx]=entry;else list.push(entry);
     const next={...holdings,[aid]:list};
     setHoldings(next);holdingsRef.current=next;
-    if(!ac?.directInput&&!ac?.cmaType&&entry.assetType!=="적금"&&entry.assetType!=="펀드"&&entry.assetType!=="CMA")fetchPrices(next);
+    if(!ac?.cmaType&&entry.assetType!=="적금"&&entry.assetType!=="펀드"&&entry.assetType!=="CMA")fetchPrices(next);
     setModal(null);setForm({});setEditIdx(null);
     showToast(editIdx!==null?"수정 완료!":"종목 추가 완료!");
   },[form,editIdx,holdings,fetchPrices,showToast]);
@@ -1304,6 +1319,17 @@ function App(){
       onTouchEnd={handleTouchEnd}
     >
       <Toast msg={toast?.msg} type={toast?.type}/>
+      {/* ★ Pull-to-Refresh 인디케이터 */}
+      {pullRefreshing&&(
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:999,background:"linear-gradient(180deg,#1d4ed8,transparent)",height:4,animation:"slideDown .3s ease"}}>
+          <div style={{height:"100%",background:"#60a5fa",animation:"pulse 1s infinite"}}/>
+        </div>
+      )}
+      {pullRefreshing&&(
+        <div style={{position:"fixed",top:50,left:"50%",transform:"translateX(-50%)",zIndex:998,background:"#1d4ed8",borderRadius:20,padding:"8px 18px",fontSize:13,color:"#fff",fontWeight:700,boxShadow:"0 4px 20px #00000060"}}>
+          🔄 갱신 중...
+        </div>
+      )}
 
       {/* ★ 헤더 */}
       <div style={{padding:"48px 18px 18px",background:"linear-gradient(180deg,#0c2040,#070e1c)",borderBottom:`1px solid ${C.border}`}}>
@@ -1400,7 +1426,7 @@ function App(){
                           <span style={{fontSize:16}}>{ac.icon}</span>
                           <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
                           {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
-                          {ac.directInput&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>직접입력</span>}
+                          {ac.pensionHint&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>퇴직연금</span>}
                         </div>
                         <div style={{fontSize:12,color:C.muted,marginTop:3}}>{(ac.list||[]).length}종목 · 투자금 {won(myInv)}</div>
                       </div>
@@ -1434,9 +1460,9 @@ function App(){
                   <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:6}}>
                     <span style={{fontSize:18,fontWeight:800,color:C.text}}>{curAcct.icon} {curAcct.label}</span>
                     {curAcct.shared&&<span style={{fontSize:11,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 8px",borderRadius:10}}>🤝 공동계좌</span>}
-                    {curAcct.directInput&&<span style={{fontSize:11,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 8px",borderRadius:10}}>📱 직접입력</span>}
+                    {curAcct.pensionHint&&<span style={{fontSize:11,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 8px",borderRadius:10}}>🏦 퇴직연금</span>}
                   </div>
-                  {curAcct.directInput&&<div style={{fontSize:12,color:C.sub,lineHeight:1.6}}>신한앱 원금+평가금액 입력 → 수익률 자동계산</div>}
+                  {curAcct.pensionHint&&<div style={{fontSize:12,color:C.sub,lineHeight:1.6}}>국내ETF: 티커+수량+평균단가 → 자동시세 | 펀드: 기준가+보유좌수 → 자동계산</div>}
                   {curAcct.shared&&<div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>수익의 1/2이 내 몫으로 집계</div>}
                   <div style={{fontSize:12,color:C.muted,marginTop:4}}>투자원금 {won(curData.invested)}</div>
                 </div>
@@ -1455,7 +1481,7 @@ function App(){
             </div>)}
             {curData.list.length===0&&(<div style={{textAlign:"center",padding:"44px 0",color:C.muted}}>
               <div style={{fontSize:44,marginBottom:12}}>📭</div>
-              <div style={{fontSize:14,color:C.sub,lineHeight:1.8}}>{curAcct.directInput?"신한앱에서 원금·평가금액 확인 후\n아래 버튼으로 추가하세요":"아래 버튼으로 종목을 추가하세요"}</div>
+              <div style={{fontSize:14,color:C.sub,lineHeight:1.8}}>{curAcct.pensionHint?"퇴직연금: ETF 티커 입력 시 자동시세, 펀드 기준가+좌수로 자동계산":"아래 버튼으로 종목을 추가하세요"}</div>
             </div>)}
             {curData.list.map((h,i)=>{
               const det=cardDet(h,curAcct);
@@ -1476,7 +1502,11 @@ function App(){
                 )}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                   <div style={{flex:1,marginRight:10}}>
-                    <div style={{fontSize:15,fontWeight:800,color:C.text,lineHeight:1.4}}>{h.name}</div>
+                    <div style={{fontSize:15,fontWeight:800,color:C.text,lineHeight:1.4}}>
+                      {h.name}
+                      {(h.qty&&parseFloat(h.qty)>0)&&<span style={{fontSize:12,color:C.muted,fontWeight:400,marginLeft:6}}>({nf(parseFloat(h.qty))}{h.assetType==="펀드"||h.assetType==="국내ETF"?"좌":"주"})</span>}
+                      {(h.assetType==="CMA"||h.assetType==="적금")&&h.principal&&<span style={{fontSize:12,color:C.muted,fontWeight:400,marginLeft:6}}>({won(h.principal)})</span>}
+                    </div>
                     <div style={{fontSize:12,color:C.muted,marginTop:4,display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
                       <span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.assetType}</span>
                       {!curAcct.directInput&&h.ticker&&<span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.ticker}</span>}
@@ -1516,7 +1546,7 @@ function App(){
                   ))}
                 </div>
                 <MiniBar pct={h.pct}/>
-                {curAcct.directInput&&<div style={{marginTop:10,padding:"10px 12px",background:C.card2,borderRadius:8,border:`1px solid ${C.border}`,fontSize:12,color:C.sub}}>💡 추가매수 후: 수정 → 원금·평가금액만 업데이트</div>}
+
                 {h.memo&&<div style={{fontSize:12,color:C.muted,marginTop:8,fontStyle:"italic"}}>📝 {h.memo}</div>}
                 <div style={{display:"flex",gap:8,marginTop:12}}>
                   <button onClick={()=>openEdit(acctTab,i)} style={{flex:1,minHeight:46,fontSize:13,fontWeight:700,background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,color:C.accent}}>✏️ 수정</button>
