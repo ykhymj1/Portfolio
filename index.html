@@ -1032,28 +1032,40 @@ function App(){
       try{const r=await fetch(url,{signal:ctrl.signal});clearTimeout(t);return r;}
       catch(e){clearTimeout(t);throw e;}
     };
+    const validKrw=(v)=>v&&Number(v)>500&&Number(v)<5000;
 
-    // ★ API1: open.er-api.com (무료, CORS OK, KRW 지원 확실)
+    // ★ API1: open.er-api.com (result 조건 없이 rates.KRW 직접 체크)
     try{
       const r=await ft("https://open.er-api.com/v6/latest/USD",6000);
       if(r.ok){
         const j=await r.json();
-        const krw=j&&j.result==="success"&&j.rates&&j.rates.KRW;
-        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+        const krw=j&&j.rates&&j.rates.KRW;
+        if(validKrw(krw))return applyFx(Number(krw));
       }
     }catch(e){}
 
-    // ★ API2: jsdelivr Fawazahmed0 currency (CDN, 완전무료, KRW 지원)
+    // ★ API2: jsdelivr currency (단위가 KRW=1499→ *1000 불필요, 실제값 확인)
     try{
       const r=await ft("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",6000);
       if(r.ok){
         const j=await r.json();
         const krw=j&&j.usd&&j.usd.krw;
-        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+        // jsdelivr는 1USD=1499.xx 형태로 제공 (실제 원화값)
+        if(validKrw(krw))return applyFx(Number(krw));
       }
     }catch(e){}
 
-    // ★ API3: Yahoo Finance via allorigins (query1)
+    // ★ API3: ExchangeRate-API 무료 (키 없음)
+    try{
+      const r=await ft("https://api.exchangerate-api.com/v4/latest/USD",6000);
+      if(r.ok){
+        const j=await r.json();
+        const krw=j&&j.rates&&j.rates.KRW;
+        if(validKrw(krw))return applyFx(Number(krw));
+      }
+    }catch(e){}
+
+    // ★ API4: Yahoo USDKRW via allorigins
     try{
       const yu="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
       const r=await ft("https://api.allorigins.win/get?url="+encodeURIComponent(yu),8000);
@@ -1062,11 +1074,11 @@ function App(){
         const raw=j&&j.contents?JSON.parse(j.contents):{};
         const meta=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0]&&raw.chart.result[0].meta;
         const krw=meta&&meta.regularMarketPrice;
-        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+        if(validKrw(krw))return applyFx(Number(krw));
       }
     }catch(e){}
 
-    // ★ API4: Yahoo Finance via codetabs (query2)
+    // ★ API5: Yahoo via codetabs
     try{
       const yu2="https://query2.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
       const r=await ft("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(yu2),8000);
@@ -1074,11 +1086,11 @@ function App(){
         const j=await r.json();
         const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
         const krw=meta&&meta.regularMarketPrice;
-        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+        if(validKrw(krw))return applyFx(Number(krw));
       }
     }catch(e){}
 
-    // ★ API5: corsproxy.io + Yahoo Finance
+    // ★ API6: Yahoo via corsproxy
     try{
       const yu3="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
       const r=await ft("https://corsproxy.io/?"+encodeURIComponent(yu3),8000);
@@ -1086,11 +1098,11 @@ function App(){
         const j=await r.json();
         const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
         const krw=meta&&meta.regularMarketPrice;
-        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+        if(validKrw(krw))return applyFx(Number(krw));
       }
     }catch(e){}
 
-    return null; // 모든 API 실패
+    return null;
   },[]);
 
   /* ★ 시세 조회 (ETF/주식) + 환율 동시 실행 */
@@ -1106,57 +1118,88 @@ function App(){
       });
     });
 
-    // ★ 단일 종목 시세 조회: 3개 프록시 × 2개 Yahoo도메인 순차 시도
+    // ★ 단일 종목 시세 조회 - Yahoo Finance 직접 + 프록시 백업
     const fetchOneTicker=async(tk)=>{
       const now=new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
-      const parseYahoo=(text)=>{
+      // Yahoo Finance JSON 파싱
+      const parseYF=(j)=>{
         try{
-          const j=JSON.parse(text);
           const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
           if(meta&&meta.regularMarketPrice)
             return{price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:now};
         }catch(e){}
         return null;
       };
-      // 프록시 wrapping된 응답 파싱
-      const parseWrapped=(text)=>{
+      const ft=async(url,ms)=>{
+        const ctrl=new AbortController();
+        const t=setTimeout(()=>ctrl.abort(),ms);
         try{
-          const j=JSON.parse(text);
-          // allorigins: {contents: "..."}
-          const inner=j&&j.contents?j.contents:text;
-          return parseYahoo(inner);
-        }catch(e){}
-        return null;
+          const r=await fetch(url,{signal:ctrl.signal,headers:{"Accept":"application/json"}});
+          clearTimeout(t);
+          if(!r.ok)throw new Error(r.status);
+          return await r.json();
+        }catch(e){clearTimeout(t);throw e;}
       };
-      const doFetch=async(url,ms)=>{
+      const ftText=async(url,ms)=>{
         const ctrl=new AbortController();
         const t=setTimeout(()=>ctrl.abort(),ms);
         try{
           const r=await fetch(url,{signal:ctrl.signal});
           clearTimeout(t);
           if(!r.ok)throw new Error(r.status);
-          return await r.text();
+          const txt=await r.text();
+          return JSON.parse(txt);
         }catch(e){clearTimeout(t);throw e;}
       };
-      // 시도 목록: [프록시URL, 파싱함수]
-      const q1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      const q2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      // ★ 6개 프록시+도메인 조합 순차 시도
-      const proxyList=[
-        ["https://api.allorigins.win/get?url="+encodeURIComponent(q1), parseWrapped, 10000],
-        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q1), parseYahoo, 10000],
-        ["https://corsproxy.io/?"+encodeURIComponent(q1), parseYahoo, 10000],
-        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped, 10000],
-        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q2), parseYahoo, 10000],
-        ["https://corsproxy.io/?"+encodeURIComponent(q2), parseYahoo, 10000],
-      ];
-      for(var pi=0;pi<proxyList.length;pi++){
-        try{
-          const text=await doFetch(proxyList[pi][0],proxyList[pi][2]);
-          const result=proxyList[pi][1](text);
-          if(result)return result;
-        }catch(e){}
-      }
+
+      // ① Yahoo Finance query1 직접 접근 (CORS 허용 경우)
+      try{
+        const j=await ft("https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",6000);
+        const r=parseYF(j);
+        if(r)return r;
+      }catch(e){}
+
+      // ② Yahoo Finance query2 직접 접근
+      try{
+        const j=await ft("https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",6000);
+        const r=parseYF(j);
+        if(r)return r;
+      }catch(e){}
+
+      // ③ allorigins 프록시 (query1)
+      try{
+        const url="https://api.allorigins.win/get?url="+encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d");
+        const j=await ft(url,10000);
+        const inner=j&&j.contents?JSON.parse(j.contents):j;
+        const r=parseYF(inner);
+        if(r)return r;
+      }catch(e){}
+
+      // ④ codetabs 프록시 (query1)
+      try{
+        const url="https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d");
+        const j=await ftText(url,10000);
+        const r=parseYF(j);
+        if(r)return r;
+      }catch(e){}
+
+      // ⑤ corsproxy (query1)
+      try{
+        const url="https://corsproxy.io/?"+encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d");
+        const j=await ftText(url,10000);
+        const r=parseYF(j);
+        if(r)return r;
+      }catch(e){}
+
+      // ⑥ allorigins (query2)
+      try{
+        const url="https://api.allorigins.win/get?url="+encodeURIComponent("https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d");
+        const j=await ft(url,10000);
+        const inner=j&&j.contents?JSON.parse(j.contents):j;
+        const r=parseYF(inner);
+        if(r)return r;
+      }catch(e){}
+
       return null;
     };
 
@@ -1294,32 +1337,36 @@ function App(){
   const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
     if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
     const tk=assetType==="국내ETF"?ticker+".KS":ticker;
-    const url="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-    const doFetch=async(proxyUrl,direct)=>{
-      const ctrl=new AbortController();
-      const t=setTimeout(()=>ctrl.abort(),10000);
+    const now=new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
+    const parseYF=(j)=>{
       try{
-        const res=await fetch(proxyUrl,{signal:ctrl.signal});
-        clearTimeout(t);
-        const j=await res.json();
-        const raw=direct?j:(j&&j.contents?JSON.parse(j.contents):{});
-        const ch=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0];
-        const meta=ch&&ch.meta;
+        const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
         if(meta&&meta.regularMarketPrice){
-          const pInfo={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})};
+          const pInfo={price:meta.regularMarketPrice,prev:meta.chartPreviousClose||meta.regularMarketPrice,currency:meta.currency||"KRW",time:now};
           setPrices(prev=>{const next={...prev,[tk]:pInfo};sv(SK_PRICES,next);return next;});
           return true;
         }
-      }catch(e){clearTimeout(t);}
+      }catch(e){}
       return false;
     };
-    try{
-      const ok=await doFetch("https://api.allorigins.win/get?url="+encodeURIComponent(url),false);
-      if(ok)return;
-    }catch(e){}
-    try{
-      await doFetch("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(url),true);
-    }catch(e){}
+    const ft=async(url,ms)=>{
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),ms);
+      try{const r=await fetch(url,{signal:ctrl.signal});clearTimeout(t);if(!r.ok)throw new Error(r.status);return await r.json();}
+      catch(e){clearTimeout(t);throw e;}
+    };
+    const urls=[
+      "https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",
+      "https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",
+    ];
+    for(const u of urls){
+      try{const j=await ft(u,6000);if(parseYF(j))return;}catch(e){}
+      try{
+        const j2=await ft("https://api.allorigins.win/get?url="+encodeURIComponent(u),10000);
+        const inner=j2&&j2.contents?JSON.parse(j2.contents):j2;
+        if(parseYF(inner))return;
+      }catch(e){}
+    }
   },[]);
 
   const openEdit=useCallback((aid,idx)=>{
