@@ -1020,55 +1020,74 @@ function App(){
   },[tab]);
   const showToast=useCallback((msg,type="success")=>setToast({msg,type}),[]);
 
-  /* ★ 환율 조회 - 6개 소스 Promise.any 완전 병렬 (가장 빠른 것 즉시 사용) */
+  /* ★ 환율 조회 - 네이버 증권 우선 + 기존 API 백업 */
   const fetchFxRate=useCallback(async()=>{
     const isValid=v=>v&&v>500&&v<5000;
-    const tryFetch=async(url,extract)=>{
+
+    const tf=async(url,ms)=>{
       const c=new AbortController();
-      const t=setTimeout(()=>c.abort(),6000);
+      const t=setTimeout(()=>c.abort(),ms);
       try{
         const r=await fetch(url,{signal:c.signal});
         clearTimeout(t);
-        const d=await r.json();
-        const v=extract(d);
-        if(isValid(v))return Math.round(v);
-        throw new Error('invalid');
+        const txt=await r.text();
+        if(!txt||txt.startsWith("<")||txt.startsWith("<!"))throw new Error("html");
+        return JSON.parse(txt);
       }catch(e){clearTimeout(t);throw e;}
     };
+
+    // 네이버 환율 응답 파싱
+    const pNaverFx=raw=>{
+      try{
+        const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+        // polling API: datas 배열
+        if(d?.datas?.[0]){
+          const s=d.datas[0];
+          const v=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||s.rate||0);
+          if(isValid(v))return Math.round(v);
+        }
+        // basic/forex API: 직접 필드
+        const v=parseFloat(
+          d?.closePrice||d?.currentPrice||d?.rate||
+          d?.basePrice||d?.value||d?.krw||0
+        );
+        if(isValid(v))return Math.round(v);
+      }catch(e){}
+      return null;
+    };
+
+    // 네이버 환율 URL들
+    const naverFx1="https://polling.finance.naver.com/api/realtime/worldstock/marketIndex/FX_USDKRW";
+    const naverFx2="https://m.stock.naver.com/api/forex/usdkrw";
+    const naverFx3="https://polling.finance.naver.com/api/realtime/worldstock/stock/FX_USDKRW";
+    const naverFx4="https://m.stock.naver.com/api/stock/FX_USDKRW/basic";
+
     const sources=[
-      tryFetch("https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
-      tryFetch("https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
-      tryFetch("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
-      // Yahoo Finance via allorigins
-      (async()=>{
-        const c=new AbortController();const t=setTimeout(()=>c.abort(),8000);
-        try{
-          const yu="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
-          const r=await fetch("https://api.allorigins.win/get?url="+encodeURIComponent(yu),{signal:c.signal});
-          clearTimeout(t);
-          const j=await r.json();
-          const raw=j?.contents?JSON.parse(j.contents):null;
-          const v=raw?.chart?.result?.[0]?.meta?.regularMarketPrice;
-          if(isValid(v))return Math.round(v);
-          throw new Error('invalid');
-        }catch(e){clearTimeout(t);throw e;}
-      })(),
-      // Yahoo Finance via corsproxy
-      (async()=>{
-        const c=new AbortController();const t=setTimeout(()=>c.abort(),8000);
-        try{
-          const yu="https://query2.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
-          const r=await fetch("https://corsproxy.io/?"+encodeURIComponent(yu),{signal:c.signal});
-          clearTimeout(t);
-          const txt=await r.text();
-          if(txt.startsWith("<"))throw new Error("html");
-          const d=JSON.parse(txt);
-          const v=d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-          if(isValid(v))return Math.round(v);
-          throw new Error('invalid');
-        }catch(e){clearTimeout(t);throw e;}
-      })(),
+      // ★ 네이버 환율 (1순위 - 가장 빠름)
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverFx1),5000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(naverFx1),6000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverFx2),5000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(naverFx2),6000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverFx3),6000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverFx4),6000)
+        .then(j=>{const v=pNaverFx(j);if(!v)throw 0;return v;}),
+      // 기존 환율 API 백업
+      tf("https://api.exchangerate-api.com/v4/latest/USD",6000)
+        .then(d=>{const v=d?.rates?.KRW;if(!isValid(v))throw 0;return Math.round(v);}),
+      tf("https://open.er-api.com/v6/latest/USD",6000)
+        .then(d=>{const v=d?.rates?.KRW;if(!isValid(v))throw 0;return Math.round(v);}),
+      tf("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",6000)
+        .then(d=>{const v=d?.usd?.krw;if(!isValid(v))throw 0;return Math.round(v);}),
+      // Yahoo Finance 백업
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d"),8000)
+        .then(j=>{const d=j?.contents?JSON.parse(j.contents):j;const v=d?.chart?.result?.[0]?.meta?.regularMarketPrice;if(!isValid(v))throw 0;return Math.round(v);}),
     ];
+
     try{
       const rounded=await Promise.any(sources);
       const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -1204,7 +1223,33 @@ function App(){
     };
 
     // ── 미국주식/ETF: Yahoo Finance (다중 프록시) ──
+    // ── 미국주식/ETF: 네이버 해외 주식 API 우선 + Yahoo Finance 백업 ──
     const fetchUS=async(ticker)=>{
+      // 네이버 해외 주식 실시간 API
+      const naverRealtimeUrl="https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker;
+      const naverWorldUrl="https://m.stock.naver.com/api/stock/"+ticker+"/basic";
+      const naverWorldUrl2="https://m.stock.naver.com/api/stock/"+ticker+"/integration";
+
+      // 네이버 해외주식 응답 파싱
+      const pNaverWorld=raw=>{
+        try{
+          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+          // polling API 형태
+          if(d?.datas?.[0]){
+            const s=d.datas[0];
+            const price=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||0);
+            const prev=parseFloat(s.openPrice||s.sv||s.open||price);
+            if(price>0)return{price,prev,currency:"USD",time:now()};
+          }
+          // basic/integration API 형태
+          const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||d?.last||0);
+          const prev=parseFloat(d?.openPrice||d?.basePrice||d?.open||price);
+          if(price>0)return{price,prev,currency:"USD",time:now()};
+        }catch(e){}
+        return null;
+      };
+
+      // Yahoo Finance 백업
       const yUrl1="https://query1.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
       const yUrl2="https://query2.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
       const qUrl1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
@@ -1218,21 +1263,37 @@ function App(){
           if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"USD",time:now()};}catch(e){}return null;};
 
       const sources=[
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),7000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),7000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),7000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl2),7000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?url="+encodeURIComponent(yUrl1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl1),9000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl2),9000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-        tf("https://thingproxy.freeboard.io/fetch/"+yUrl1,10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-        tf("https://proxy.cors.sh/"+yUrl1,10000,{"x-cors-api-key":"temp_pf"}).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // ★ 네이버 해외 주식 실시간 (1순위)
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverRealtimeUrl),6000)
+          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?url="+encodeURIComponent(naverRealtimeUrl),7000)
+          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?"+encodeURIComponent(naverRealtimeUrl),7000)
+          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
+        // ★ 네이버 basic API
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverWorldUrl),7000)
+          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverWorldUrl2),7000)
+          .then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
+        // Yahoo Finance 병렬 백업
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl2),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl1),9000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
       ];
       try{const res=await Promise.any(sources);return res;}
       catch(e){
         await new Promise(res=>setTimeout(res,2000));
         try{return await Promise.any([
+          tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverRealtimeUrl),10000).then(j=>{const r=pNaverWorld(j);if(!r)throw 0;return r;}),
           tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
           tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
         ]);}catch(e2){return null;}
@@ -1364,7 +1425,7 @@ function App(){
     setForm({_acctId:acctTab,assetType:dt,currency:dt.includes("미국")?"USD":"KRW"});
     setEditIdx(null);setModal("holding");
   },[acctTab]);
-  // ★ 단일 티커 즉시 조회 (모달 열릴때) - 국내ETF는 네이버, 해외는 Yahoo
+  // ★ 단일 티커 즉시 조회 (모달 열릴때) - 국내ETF·미국주식 모두 네이버 우선
   const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
     if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
     const isKR=assetType==="국내ETF";
@@ -1379,44 +1440,54 @@ function App(){
         return JSON.parse(txt);
       }catch(e){clearTimeout(t);throw e;}
     };
-    const pV8=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};}catch(e){}return null;};
-    const pV7=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};}catch(e){}return null;};
-    const pNaver=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=parseFloat(s.closePrice||s.currentPrice||s.nv||0);const prev=parseFloat(s.openPrice||s.sv||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||0);const prev=parseFloat(d?.openPrice||d?.basePrice||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}catch(e){}return null;};
+    const pV8=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:isKR?"KRW":m.currency||"USD",time:now()};}catch(e){}return null;};
+    const pV7=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:isKR?"KRW":q.currency||"USD",time:now()};}catch(e){}return null;};
+    // 국내 네이버 파싱
+    const pNaverKR=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=parseFloat(s.closePrice||s.currentPrice||s.nv||0);const prev=parseFloat(s.openPrice||s.sv||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||0);const prev=parseFloat(d?.openPrice||d?.basePrice||price);if(price>0)return{price,prev,currency:"KRW",time:now()};}catch(e){}return null;};
+    // 해외 네이버 파싱
+    const pNaverUS=raw=>{try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;if(d?.datas?.[0]){const s=d.datas[0];const price=parseFloat(s.closePrice||s.currentPrice||s.nv||s.last||0);const prev=parseFloat(s.openPrice||s.sv||s.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}const price=parseFloat(d?.closePrice||d?.currentPrice||d?.stockPrice||d?.last||0);const prev=parseFloat(d?.openPrice||d?.basePrice||d?.open||price);if(price>0)return{price,prev,currency:"USD",time:now()};}catch(e){}return null;};
+
     const save=r=>{setPrices(prev=>{const next={...prev,[storeKey]:r};sv(SK_PRICES,next);return next;});};
 
     const code=ticker.replace(".KS","");
+    const naverKRQ="https://polling.finance.naver.com/api/realtime/domestic/stock/"+code;
+    const naverKRB="https://m.stock.naver.com/api/stock/"+code+"/basic";
+    const naverUSQ="https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker;
+    const naverUSB="https://m.stock.naver.com/api/stock/"+ticker+"/basic";
+    const naverUSI="https://m.stock.naver.com/api/stock/"+ticker+"/integration";
     const yTk=isKR?code+".KS":ticker;
     const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
     const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
     const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+yTk;
-    const q2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+yTk;
-    const naverQ="https://polling.finance.naver.com/api/realtime/domestic/stock/"+code;
-    const naverB="https://m.stock.naver.com/api/stock/"+code+"/basic";
 
     const sources=isKR?[
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverQ),7000).then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverB),7000).then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
-      tf("https://corsproxy.io/?url="+encodeURIComponent(naverB),8000).then(j=>{const r=pNaver(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverKRQ),6000).then(j=>{const r=pNaverKR(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverKRB),7000).then(j=>{const r=pNaverKR(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(naverKRB),8000).then(j=>{const r=pNaverKR(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+    ]:[
+      // 네이버 해외 주식 우선
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverUSQ),6000).then(j=>{const r=pNaverUS(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(naverUSQ),7000).then(j=>{const r=pNaverUS(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?"+encodeURIComponent(naverUSQ),7000).then(j=>{const r=pNaverUS(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverUSB),7000).then(j=>{const r=pNaverUS(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(naverUSI),7000).then(j=>{const r=pNaverUS(j);if(!r)throw 0;return r;}),
+      // Yahoo 백업
       tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
       tf("https://api.allorigins.win/get?url="+encodeURIComponent(y2),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
       tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
       tf("https://corsproxy.io/?"+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-    ]:[
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),7000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y2),7000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),7000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q2),7000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-      tf("https://corsproxy.io/?url="+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-      tf("https://corsproxy.io/?"+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-      tf("https://corsproxy.io/?"+encodeURIComponent(q1),9000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
-      tf("https://thingproxy.freeboard.io/fetch/"+y1,10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
-      tf("https://proxy.cors.sh/"+y1,10000,{"x-cors-api-key":"temp_pf"}).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
     ];
+
+    const primaryNaverUrl=isKR?naverKRQ:naverUSQ;
+    const primaryParse=isKR?pNaverKR:pNaverUS;
     try{const r=await Promise.any(sources);if(r)save(r);}
     catch(e){
       await new Promise(res=>setTimeout(res,2000));
       try{const r=await Promise.any([
-        tf("https://api.allorigins.win/get?url="+encodeURIComponent(isKR?naverQ:y1),10000).then(j=>{const rr=isKR?pNaver(j):pV8(j);if(!rr)throw 0;return rr;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(primaryNaverUrl),10000).then(j=>{const rr=primaryParse(j);if(!rr)throw 0;return rr;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),10000).then(j=>{const rr=pV8(j);if(!rr)throw 0;return rr;}),
         tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),10000).then(j=>{const rr=pV7(j);if(!rr)throw 0;return rr;}),
       ]);if(r)save(r);}catch(e2){}
     }
