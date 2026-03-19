@@ -373,7 +373,7 @@ function ProfitBadge({pct:p,pnl,size="md"}){
   const fs=size==="lg"?14:size==="sm"?11:12;
   const ok=pnl!==undefined&&!isNaN(parseFloat(pnl));
   return(<span style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:fs,fontWeight:700,color:col,background:isZero?"#52709620":isUp?C.upBg:C.dnBg,padding:"3px 10px",borderRadius:20,whiteSpace:"nowrap"}}>
-    {isZero?"—":isUp?"▲":"▼"} {pf(Math.abs(v))}
+    {isZero?"—":isUp?"▲":"▼"} {Math.abs(v).toFixed(2)}%
     {ok&&<span style={{opacity:.9}}>· {pnl>=0?"+":""}{won(pnl)}</span>}
   </span>);
 }
@@ -427,7 +427,9 @@ function DonutChart({holdings,calcH,prices,fxRate}){
    수익률 히스토리 그래프
 ════════════════════════════════════════════ */
 function LineChart({data,color,height=140}){
-  if(!data||data.length<2)return null;
+  if(!data||data.length<1)return null;
+  // 데이터 1개면 가상 포인트 추가해서 선 표시
+  if(data.length===1)data=[{...data[0],label:"시작"},{...data[0],label:data[0].label||"오늘"}];
   const W=340,H=height,pt=10,pb=26,pl=44,pr=10;
   const iw=W-pl-pr,ih=H-pt-pb;
   const vals=data.map(d=>d.v);
@@ -519,7 +521,7 @@ function GraphView({allAccounts,myTotal,myPnl,myPct,history}){
     if(!f?.inv)return null;
     return(l.cur-f.inv)/f.inv*100;
   },[chartData]);
-  const hasData=chartData.length>=2;
+  const hasData=chartData.length>=1;
   const dataCount=Object.keys(history).filter(d=>d>=GRAPH_START).length;
 
   return(
@@ -741,15 +743,28 @@ const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,
     </>);
     if(at==="펀드")return(<>
       <div style={{background:"#0a1525",border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
-        <div style={{fontSize:13,color:C.green,fontWeight:700,marginBottom:6}}>📈 펀드 기준가 방식</div>
-        <div style={{fontSize:12,color:C.sub,lineHeight:1.7}}>네이버금융 → 펀드명 검색 → <b style={{color:C.text}}>기준가</b> 확인 후 입력<br/>평가금액 = 기준가 × 보유좌수</div>
+        <div style={{fontSize:13,color:C.green,fontWeight:700,marginBottom:6}}>📈 펀드 기준가 방식 (IRP·ISA·연금 지원)</div>
+        <div style={{fontSize:12,color:C.sub,lineHeight:1.7}}>
+          신한앱 → 펀드 선택 → 잔고좌수 확인<br/>
+          <b style={{color:C.text}}>기준가 = 평가금액 ÷ 잔고좌수</b><br/>
+          <b style={{color:C.text}}>매입기준가 = 납입원금 ÷ 잔고좌수</b><br/>
+          <span style={{color:"#f59e0b"}}>소수점 4자리까지 입력하세요</span>
+        </div>
       </div>
       <div><Lbl t="펀드명 *"/><ModalInput style={INP} placeholder="예: 신한스노우볼인컴채권혼합" value={form.name||""} onChange={e=>sf("name",e.target.value)}/></div>
       <div style={{display:"flex",gap:10}}>
-        <div style={{flex:1}}><Lbl t="보유좌수"/><ModalInput style={INP} type="number" inputMode="numeric" placeholder="0" value={form.qty||""} onChange={e=>sf("qty",e.target.value)}/></div>
-        <div style={{flex:1}}><Lbl t="매입평균기준가"/><ModalInput style={INP} type="number" inputMode="decimal" step="0.01" placeholder="1023.45" value={form.avgNav||""} onChange={e=>sf("avgNav",e.target.value)}/></div>
+        <div style={{flex:1}}><Lbl t="보유좌수 (신한앱 잔고좌수)"/><ModalInput style={INP} type="number" inputMode="numeric" placeholder="77491578" value={form.qty||""} onChange={e=>sf("qty",e.target.value)}/></div>
+        <div style={{flex:1}}><Lbl t="납입원금 (원, 계산용)"/><ModalInput style={INP} type="number" inputMode="numeric" placeholder="0" value={form.fundPrincipal||""} onChange={e=>{sf("fundPrincipal",e.target.value);const q=parseFloat(form.qty)||1;const avgN=parseFloat(e.target.value)/q;if(avgN>0)sf("avgNav",avgN.toFixed(4));}}/></div>
       </div>
-      <div><Lbl t="현재 기준가 — 네이버금융 확인"/><ModalInput style={INP} type="number" inputMode="decimal" step="0.01" placeholder="980.50" value={form.nav||""} onChange={e=>sf("nav",e.target.value)}/></div>
+      <div style={{display:"flex",gap:10}}>
+        <div style={{flex:1}}><Lbl t="매입평균기준가 (자동계산됨)"/><ModalInput style={INP} type="number" inputMode="decimal" step="0.0001" placeholder="1.6710" value={form.avgNav||""} onChange={e=>sf("avgNav",e.target.value)}/></div>
+        <div style={{flex:1}}><Lbl t="현재 기준가 (평가금액÷좌수)"/><ModalInput style={INP} type="number" inputMode="decimal" step="0.0001" placeholder="1.6883" value={form.nav||""} onChange={e=>sf("nav",e.target.value)}/></div>
+      </div>
+      <div style={{background:"#0a1a2a",borderRadius:10,padding:12,border:"1px solid #1a3050",fontSize:12,color:C.sub}}>
+        💡 예시: 잔고좌수 77,491,578 · 납입원금 129,484,724<br/>
+        매입기준가 = 129,484,724 ÷ 77,491,578 = <b style={{color:C.text}}>1.6710</b><br/>
+        현재기준가 = 130,828,256 ÷ 77,491,578 = <b style={{color:C.text}}>1.6883</b>
+      </div>
       {p3&&<PrevBox pnl={p3.pnl} pct={p3.pct}/>}
       <div><Lbl t="메모 (선택)"/><ModalInput style={INP} value={form.memo||""} onChange={e=>sf("memo",e.target.value)}/></div>
     </>);
@@ -941,6 +956,7 @@ function App(){
     // 수평 스와이프 조건 강화: 80px 이상 + 수평이 수직의 2배 이상
     if(Math.abs(dx)<80||Math.abs(dx)<Math.abs(dy)*2)return;
     // accounts 탭에서는 스와이프 비활성 (계좌 탭 가로스크롤 충돌)
+    // accounts 탭: 계좌 탭 가로스크롤과 충돌하므로 완전 비활성
     if(tab==="accounts")return;
     const idx=TABS.indexOf(tab);
     if(dx>0&&idx<TABS.length-1)setTab(TABS[idx+1]);
@@ -949,24 +965,40 @@ function App(){
 
   useEffect(()=>{sv(SK,{holdings,fxRate});},[holdings,fxRate]);
 
-  // ★ 매일 수익률 스냅샷 저장 (2025-10-01부터)
+  // ★ 수익률 스냅샷 저장 - prices 변경될 때마다 (오늘 데이터 즉시 갱신)
   useEffect(()=>{
     if(!allAccounts.length)return;
     const today=new Date().toISOString().slice(0,10);
     if(today<GRAPH_START)return;
+    // myTotal.current가 0이어도 저장 (종목 없는 계좌 포함)
     try{
       const hist=ld(SK_HISTORY,{});
       const snap={total:{invested:myTotal.invested,current:myTotal.current}};
       allAccounts.forEach(ac=>{const r=ac.shared ? 0.5 : 1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
       hist[today]=snap;
-      // 365일 초과 정리
       const keys=Object.keys(hist).sort();
       if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
       sv(SK_HISTORY,hist);
-      setHistory({...hist}); // ★ state 즉시 업데이트
+      setHistory({...hist});
     }catch(e){}
-  },[allAccounts,myTotal]);
+  },[allAccounts,myTotal,prices]); // ★ prices 변경시도 저장 (갱신 즉시 그래프 반영)
   useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(null),2800);return()=>clearTimeout(t);},[toast]);
+
+  // ★ 안드로이드 뒤로가기/좌측스와이프 앱종료 방지
+  useEffect(()=>{
+    // 빈 히스토리 항목 추가 → 뒤로가도 앱 내에서 처리
+    window.history.pushState({page:"app"},"",window.location.href);
+    const onPop=(e)=>{
+      // 뒤로가기 감지 → 앱 내부 처리
+      window.history.pushState({page:"app"},"",window.location.href);
+      // 탭이 첫번째가 아니면 이전탭으로
+      const idx=TABS.indexOf(tab);
+      if(idx>0)setTab(TABS[idx-1]);
+      // 이미 첫탭이면 아무것도 안함 (앱 종료 방지)
+    };
+    window.addEventListener("popstate",onPop);
+    return()=>window.removeEventListener("popstate",onPop);
+  },[tab]);
   const showToast=useCallback((msg,type="success")=>setToast({msg,type}),[]);
 
   /* ★ 환율 조회 - 두 프록시 동시 race, 먼저 오는 것 사용 (속도 2배 향상) */
@@ -1066,17 +1098,18 @@ function App(){
       // 시도 목록: [프록시URL, 파싱함수]
       const q1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
       const q2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      const tries=[
+      // ★ 여러 프록시 순차 시도 - 각 12초 타임아웃
+      const proxyList=[
         ["https://api.allorigins.win/get?url="+encodeURIComponent(q1), parseWrapped],
-        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped],
         ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q1), parseYahoo],
         ["https://corsproxy.io/?"+encodeURIComponent(q1), parseYahoo],
+        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped],
         ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q2), parseYahoo],
       ];
-      for(var i=0;i<tries.length;i++){
+      for(var i=0;i<proxyList.length;i++){
         try{
-          const text=await doFetch(tries[i][0],10000);
-          const result=tries[i][1](text);
+          const text=await doFetch(proxyList[i][0],12000);
+          const result=proxyList[i][1](text);
           if(result)return result;
         }catch(e){}
       }
@@ -1099,9 +1132,23 @@ function App(){
     if(Object.keys(newP).length>0){
       setPrices(prev=>{
         const next={...prev,...newP};
-        sv(SK_PRICES,next); // ★ 시세 캐시 저장 → 다음 앱 시작시 즉시 복원
+        sv(SK_PRICES,next);
         return next;
       });
+    }
+    // ★ 실패한 종목 재시도 (3초 후)
+    const failedTickers=allTickers.filter(tk=>!newP[tk]);
+    if(failedTickers.length>0){
+      setTimeout(async()=>{
+        const retryP={};
+        await Promise.allSettled(failedTickers.map(async(tk)=>{
+          const r=await fetchOneTicker(tk);
+          if(r)retryP[tk]=r;
+        }));
+        if(Object.keys(retryP).length>0){
+          setPrices(prev=>{const next={...prev,...retryP};sv(SK_PRICES,next);return next;});
+        }
+      },3000);
     }
     setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
     setCountdown(600);setFetching(false);
@@ -1511,7 +1558,7 @@ function App(){
                       <span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.assetType}</span>
                       {!curAcct.directInput&&h.ticker&&<span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.ticker}</span>}
                       {h.calcMode==="auto"&&h.pInfo&&h.pInfo.time&&<span style={{color:C.green,fontWeight:600}}>● 자동 {h.pInfo.time}</span>}
-                      {h.calcMode==="auto"&&h.pInfo&&!h.pInfo.time&&<span style={{color:"#f59e0b",fontWeight:600}}>● 캐시데이터</span>}
+                      {h.calcMode==="auto"&&h.pInfo&&!h.pInfo.time&&<span style={{color:"#f59e0b",fontWeight:600}}>● 이전시세</span>}
                       {h.calcMode==="cma"&&<span style={{color:"#06b6d4",fontWeight:600}}>💳 CMA 이자 자동계산</span>}
                       {h.calcMode==="savings"&&<span style={{color:"#fb923c",fontWeight:600}}>💰 이자 자동계산</span>}
                       {h.calcMode==="fund"&&<span style={{color:C.green,fontWeight:600}}>📊 기준가 방식</span>}
@@ -1567,6 +1614,17 @@ function App(){
             </div>
           </div>
         </div>
+      )}
+
+      {/* 수익 그래프 */}
+      {tab==="graph"&&(
+        <GraphView
+          allAccounts={allAccounts}
+          myTotal={myTotal}
+          myPnl={myPnl}
+          myPct={myPct}
+          history={history}
+        />
       )}
 
       {/* AI */}
