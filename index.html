@@ -319,6 +319,8 @@ const GRAPH_START="2025-10-01"; // 그래프 시작일
 const SK_FX="pf_fx_cache";            // 환율 캐시
 const TABS=["dash","accounts","graph","ai"];
 const SK_HISTORY="pf_history_v1";
+const SK_ACCT_ORDER="pf_acct_order"; // 계좌 순서
+const SK_ITEM_ORDER="pf_item_order"; // 종목 순서 {aid: [idx,...]}
 
 /* ─── 유틸 ─── */
 const toKRW=(n,cur,fx)=>cur==="USD"?n*(fx||DEFAULT_FX):n;
@@ -859,6 +861,8 @@ function App(){
   const saved=useMemo(()=>ld(SK,{holdings:{},fxRate:DEFAULT_FX}),[]);
   const[tab,setTab]=useState("dash");
   const[acctTab,setAcctTab]=useState("amt");
+  // 계좌 탭 전환 시 종목편집 모드 리셋
+  const switchAcctTab=useCallback((id)=>{setAcctTab(id);setEditingItemOrder(false);},[]);
   const[holdings,setHoldings]=useState(()=>saved.holdings||{});
   // ★ 환율: 프리페치 캐시 → localStorage 저장값 → 기본값 순서로 복원
   const[fxRate,setFxRate]=useState(()=>{
@@ -893,6 +897,17 @@ function App(){
   const[aiA,setAiA]=useState("");
   const[aiLoad,setAiLoad]=useState(false);
   const[history,setHistory]=useState(()=>ld(SK_HISTORY,{}));
+
+  // ★ 계좌 순서 (기본값: ACCOUNTS 순서)
+  const[acctOrder,setAcctOrder]=useState(()=>{
+    const saved=ld(SK_ACCT_ORDER,null);
+    if(saved&&Array.isArray(saved)&&saved.length===ACCOUNTS.length)return saved;
+    return ACCOUNTS.map(a=>a.id);
+  });
+  // ★ 계좌 순서 변경 편집 모드
+  const[editingAcctOrder,setEditingAcctOrder]=useState(false);
+  // ★ 종목 순서 편집 모드 (계좌별)
+  const[editingItemOrder,setEditingItemOrder]=useState(false);
   const holdingsRef=useRef(holdings);
   useEffect(()=>{holdingsRef.current=holdings;},[holdings]);
   // ★ fxRateRef: 환율을 ref로도 유지 → fetchPrices 내 클로저에서 최신값 즉시 사용
@@ -1114,7 +1129,11 @@ function App(){
     return{list,invested:inv,current:cur,pnl:cur-inv,pct:inv>0?(cur-inv)/inv*100:0};
   },[holdings,prices,fxRate,calcH]);
 
-  const allAccounts=useMemo(()=>ACCOUNTS.map(ac=>({...ac,...calcAcct(ac.id)})),[calcAcct]);
+  // ★ allAccounts: acctOrder 순서 적용
+  const allAccounts=useMemo(()=>{
+    const base=ACCOUNTS.map(ac=>({...ac,...calcAcct(ac.id)}));
+    return acctOrder.map(id=>base.find(a=>a.id===id)).filter(Boolean);
+  },[calcAcct,acctOrder]);
 
   /* ★ 내 총자산 (AMT 1/2 + 나머지) */
   const myTotal=useMemo(()=>allAccounts.reduce((s,ac)=>{
@@ -1127,6 +1146,34 @@ function App(){
   const curAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===acctTab),[acctTab]);
   const curData=useMemo(()=>calcAcct(acctTab),[calcAcct,acctTab]);
   const mAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===(form._acctId||acctTab)),[form._acctId,acctTab]);
+
+  /* ★ 계좌 순서 변경 */
+  const moveAcct=useCallback((id,dir)=>{
+    setAcctOrder(prev=>{
+      const arr=[...prev];
+      const i=arr.indexOf(id);
+      if(i<0)return arr;
+      const j=dir==="up"?i-1:i+1;
+      if(j<0||j>=arr.length)return arr;
+      [arr[i],arr[j]]=[arr[j],arr[i]];
+      sv(SK_ACCT_ORDER,arr);
+      return arr;
+    });
+  },[]);
+
+  /* ★ 종목 순서 변경 */
+  const moveItem=useCallback((aid,idx,dir)=>{
+    setHoldings(prev=>{
+      const list=[...(prev[aid]||[])];
+      const j=dir==="up"?idx-1:idx+1;
+      if(j<0||j>=list.length)return prev;
+      [list[idx],list[j]]=[list[j],list[idx]];
+      const next={...prev,[aid]:list};
+      holdingsRef.current=next;
+      sv(SK,{holdings:next,fxRate});
+      return next;
+    });
+  },[fxRate]);
 
   /* CRUD */
   const openAdd=useCallback(()=>{
@@ -1314,27 +1361,59 @@ function App(){
       {/* 대시보드 */}
       {tab==="dash"&&(
         <div style={{padding:"16px 16px 8px"}}>
-          <ST t="계좌별 현황"/>
-          {allAccounts.map(ac=>{
+          {/* 계좌별 현황 헤더 + 순서편집 버튼 */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:12,color:C.sub,fontWeight:700,letterSpacing:.8,textTransform:"uppercase"}}>계좌별 현황</div>
+            <button onClick={()=>setEditingAcctOrder(e=>!e)} style={{padding:"5px 12px",background:editingAcctOrder?C.accent+"33":C.card2,border:`1px solid ${editingAcctOrder?C.accent:C.border}`,borderRadius:20,color:editingAcctOrder?C.accent:C.muted,fontSize:12,fontWeight:700}}>
+              {editingAcctOrder?"✅ 완료":"⇅ 순서변경"}
+            </button>
+          </div>
+          {allAccounts.map((ac,idx)=>{
             const r=ac.shared ? 0.5 : 1,myCur=ac.current*r,myInv=ac.invested*r,myP=myCur-myInv;
-            return(<div key={ac.id} onClick={()=>{setTab("accounts");setAcctTab(ac.id);}} style={{background:C.card,borderRadius:14,padding:"14px 16px",border:`1px solid ${C.border}`,borderLeft:`4px solid ${ac.color}`,marginBottom:8,minHeight:70,cursor:"pointer"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                <div style={{flex:1,marginRight:10}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    <span style={{fontSize:16}}>{ac.icon}</span>
-                    <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
-                    {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
-                    {ac.directInput&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>직접입력</span>}
+            return(
+              <div key={ac.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",border:`1px solid ${editingAcctOrder?C.accent+"44":C.border}`,borderLeft:`4px solid ${ac.color}`,marginBottom:8,minHeight:70,position:"relative"}}>
+                {/* 순서편집 모드 */}
+                {editingAcctOrder?(
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    {/* 위아래 버튼 */}
+                    <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+                      <button onClick={()=>moveAcct(ac.id,"up")} disabled={idx===0}
+                        style={{width:32,height:32,background:idx===0?C.card2:"#1e3a5f",border:`1px solid ${idx===0?C.border:C.accent}`,borderRadius:8,color:idx===0?C.muted:C.accent,fontSize:16,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center"}}>▲</button>
+                      <button onClick={()=>moveAcct(ac.id,"dn")} disabled={idx===allAccounts.length-1}
+                        style={{width:32,height:32,background:idx===allAccounts.length-1?C.card2:"#1e3a5f",border:`1px solid ${idx===allAccounts.length-1?C.border:C.accent}`,borderRadius:8,color:idx===allAccounts.length-1?C.muted:C.accent,fontSize:16,lineHeight:1,display:"flex",alignItems:"center",justifyContent:"center"}}>▼</button>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{fontSize:16}}>{ac.icon}</span>
+                        <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
+                        {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
+                      </div>
+                      <div style={{fontSize:12,color:C.muted,marginTop:3}}>{(ac.list||[]).length}종목 · {won(myCur)}</div>
+                    </div>
+                    <div style={{fontSize:13,color:C.muted,fontWeight:700}}>#{idx+1}</div>
                   </div>
-                  <div style={{fontSize:12,color:C.muted,marginTop:3}}>{(ac.list||[]).length}종목 · 투자금 {won(myInv)}</div>
-                </div>
-                <div style={{textAlign:"right",flexShrink:0}}>
-                  <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
-                  <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
-                </div>
+                ):(
+                  <div onClick={()=>{setTab("accounts");switchAcctTab(ac.id);}} style={{cursor:"pointer"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div style={{flex:1,marginRight:10}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                          <span style={{fontSize:16}}>{ac.icon}</span>
+                          <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
+                          {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
+                          {ac.directInput&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>직접입력</span>}
+                        </div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>{(ac.list||[]).length}종목 · 투자금 {won(myInv)}</div>
+                      </div>
+                      <div style={{textAlign:"right",flexShrink:0}}>
+                        <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
+                        <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
+                      </div>
+                    </div>
+                    <MiniBar pct={ac.pct}/>
+                  </div>
+                )}
               </div>
-              <MiniBar pct={ac.pct}/>
-            </div>);
+            );
           })}
           <DonutChart holdings={holdings} calcH={calcH} prices={prices} fxRate={fxRate}/>
         </div>
@@ -1344,7 +1423,7 @@ function App(){
       {tab==="accounts"&&(
         <div>
           <div style={{display:"flex",overflowX:"auto",gap:8,padding:"12px 16px",borderBottom:`1px solid ${C.border}`}}>
-            {ACCOUNTS.map(ac=>(<button key={ac.id} onClick={()=>setAcctTab(ac.id)} style={{flexShrink:0,minHeight:40,padding:"0 16px",borderRadius:20,fontSize:13,fontWeight:700,whiteSpace:"nowrap",border:`1px solid ${acctTab===ac.id?ac.color:C.border}`,background:acctTab===ac.id?ac.color+"22":"transparent",color:acctTab===ac.id?ac.color:C.muted}}>
+            {ACCOUNTS.map(ac=>(<button key={ac.id} onClick={()=>switchAcctTab(ac.id)} style={{flexShrink:0,minHeight:40,padding:"0 16px",borderRadius:20,fontSize:13,fontWeight:700,whiteSpace:"nowrap",border:`1px solid ${acctTab===ac.id?ac.color:C.border}`,background:acctTab===ac.id?ac.color+"22":"transparent",color:acctTab===ac.id?ac.color:C.muted}}>
               {ac.icon} {ac.short}
             </button>))}
           </div>
@@ -1380,7 +1459,21 @@ function App(){
             </div>)}
             {curData.list.map((h,i)=>{
               const det=cardDet(h,curAcct);
-              return(<div key={i} style={{background:C.card,borderRadius:14,padding:16,border:`1px solid ${C.border}`,borderLeft:`3px solid ${curAcct.color}`,marginBottom:12}}>
+              const totalItems=curData.list.length;
+              return(<div key={i} style={{background:C.card,borderRadius:14,padding:16,border:`1px solid ${editingItemOrder?C.accent+"44":C.border}`,borderLeft:`3px solid ${curAcct.color}`,marginBottom:12,position:"relative"}}>
+                {/* 순서 편집 오버레이 */}
+                {editingItemOrder&&(
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${C.border}`}}>
+                    <div style={{display:"flex",gap:6,flexShrink:0}}>
+                      <button onClick={()=>moveItem(acctTab,i,"up")} disabled={i===0}
+                        style={{width:40,height:40,background:i===0?C.card2:"#1e3a5f",border:`1px solid ${i===0?C.border:C.accent}`,borderRadius:10,color:i===0?C.muted:C.accent,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center"}}>▲</button>
+                      <button onClick={()=>moveItem(acctTab,i,"dn")} disabled={i===totalItems-1}
+                        style={{width:40,height:40,background:i===totalItems-1?C.card2:"#1e3a5f",border:`1px solid ${i===totalItems-1?C.border:C.accent}`,borderRadius:10,color:i===totalItems-1?C.muted:C.accent,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center"}}>▼</button>
+                    </div>
+                    <div style={{flex:1,fontSize:14,fontWeight:700,color:C.text}}>{h.name}</div>
+                    <div style={{fontSize:20,color:C.muted,fontWeight:700}}>#{i+1}</div>
+                  </div>
+                )}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
                   <div style={{flex:1,marginRight:10}}>
                     <div style={{fontSize:15,fontWeight:800,color:C.text,lineHeight:1.4}}>{h.name}</div>
@@ -1431,9 +1524,17 @@ function App(){
                 </div>
               </div>);
             })}
-            <button onClick={openAdd} style={{width:"100%",minHeight:52,fontSize:15,fontWeight:700,background:`${curAcct.color}20`,border:`1px solid ${curAcct.color}60`,borderRadius:14,color:curAcct.color,marginTop:4}}>
-              ➕ {curAcct.label} 종목 추가
-            </button>
+            {/* 종목 순서 편집 + 추가 */}
+            <div style={{display:"flex",gap:8,marginTop:4}}>
+              {curData.list.length>1&&(
+                <button onClick={()=>setEditingItemOrder(e=>!e)} style={{flex:1,minHeight:52,fontSize:14,fontWeight:700,background:editingItemOrder?C.accent+"22":C.card2,border:`1px solid ${editingItemOrder?C.accent:C.border}`,borderRadius:14,color:editingItemOrder?C.accent:C.muted}}>
+                  {editingItemOrder?"✅ 순서 저장":"⇅ 순서변경"}
+                </button>
+              )}
+              <button onClick={openAdd} style={{flex:2,minHeight:52,fontSize:15,fontWeight:700,background:`${curAcct.color}20`,border:`1px solid ${curAcct.color}60`,borderRadius:14,color:curAcct.color}}>
+                ➕ {curAcct.label} 종목 추가
+              </button>
+            </div>
           </div>
         </div>
       )}
