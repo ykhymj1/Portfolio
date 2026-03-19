@@ -1101,92 +1101,104 @@ function App(){
       setCountdown(600);setFetching(false);return;
     }
 
-    // 3. 핵심 유틸
-    const nowStr=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
-
-    // text로 받아 JSON 파싱 (Content-Type 무관)
-    const fetchJson=async(url,ms,extraHeaders)=>{
-      const c=new AbortController();
-      const t=setTimeout(()=>c.abort(),ms);
-      try{
-        const r=await fetch(url,{signal:c.signal,headers:extraHeaders||{}});
-        clearTimeout(t);
-        if(!r.ok)throw new Error("HTTP "+r.status);
-        const txt=await r.text();
-        // HTML 응답이면 실패
-        if(txt.startsWith("<"))throw new Error("HTML response");
-        return JSON.parse(txt);
-      }catch(e){clearTimeout(t);throw e;}
-    };
-
-    // allorigins {contents} unwrap
-    const uw=(j)=>{
-      if(j&&typeof j.contents==="string"){
-        try{return JSON.parse(j.contents);}catch(e){}
-      }
-      return j;
-    };
-
-    // Yahoo v8 chart 응답 파싱
-    const parseYahoo=(raw)=>{
-      try{
-        const d=uw(raw);
-        const m=d?.chart?.result?.[0]?.meta;
-        if(m&&m.regularMarketPrice)return{
-          price:m.regularMarketPrice,
-          prev:m.chartPreviousClose||m.regularMarketPrice,
-          currency:m.currency||"KRW",
-          time:nowStr()
-        };
-      }catch(e){}
-      return null;
-    };
-
-
-
-    // 4. ★★ 단일 티커 조회: 6개 소스 Promise.any 완전 병렬 + v7 quote API 추가
-    const fetchOneTicker=async(tk,assetType)=>{
+    // 4. ★★ 단일 티커 조회: 최대한 많은 루트로 병렬 시도 (성공률 극대화)
+    const fetchOneTicker=async(tk)=>{
+      const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
       const yUrl1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
       const yUrl2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
       const qUrl1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+tk;
       const qUrl2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+tk;
-      const fj=async(url,ms,h)=>{
-        const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
+
+      // fetch with timeout
+      const tf=async(url,ms,hdrs)=>{
+        const c=new AbortController();
+        const t=setTimeout(()=>c.abort(),ms);
         try{
-          const r=await fetch(url,{signal:c.signal,headers:h||{}});
-          clearTimeout(t);if(!r.ok)throw new Error(r.status);
-          const txt=await r.text();if(txt.startsWith("<"))throw new Error("html");
+          const r=await fetch(url,{signal:c.signal,headers:hdrs||{"User-Agent":"Mozilla/5.0"}});
+          clearTimeout(t);
+          if(!r.ok)throw new Error(r.status);
+          const txt=await r.text();
+          if(!txt||txt.startsWith("<")||txt.startsWith("<!"))throw new Error("html");
           return JSON.parse(txt);
         }catch(e){clearTimeout(t);throw e;}
       };
-      const parseY=raw=>{
-        const d=raw&&raw.contents?JSON.parse(raw.contents):raw;
-        const m=d?.chart?.result?.[0]?.meta;
-        if(m?.regularMarketPrice)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:nowStr()};
+
+      // v8 chart 파싱
+      const pV8=raw=>{
+        try{
+          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+          const m=d?.chart?.result?.[0]?.meta;
+          if(m?.regularMarketPrice&&m.regularMarketPrice>0)
+            return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};
+        }catch(e){}
         return null;
       };
-      const parseQuote=raw=>{
-        const d=raw&&raw.contents?JSON.parse(raw.contents):raw;
-        const q=d?.quoteResponse?.result?.[0];
-        if(q?.regularMarketPrice)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:nowStr()};
+      // v7 quote 파싱
+      const pV7=raw=>{
+        try{
+          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+          const q=d?.quoteResponse?.result?.[0];
+          if(q?.regularMarketPrice&&q.regularMarketPrice>0)
+            return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};
+        }catch(e){}
         return null;
       };
+
+      // 모든 소스 동시 시도
       const sources=[
-        fj("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),7000).then(j=>{const r=parseY(j);if(!r)throw 0;return r;}),
-        fj("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),7000).then(j=>{const r=parseY(j);if(!r)throw 0;return r;}),
-        fj("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),7000).then(j=>{const r=parseQuote(j);if(!r)throw 0;return r;}),
-        fj("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000).then(j=>{const r=parseY(j);if(!r)throw 0;return r;}),
-        fj("https://corsproxy.io/?"+encodeURIComponent(qUrl2),9000).then(j=>{const r=parseQuote(j);if(!r)throw 0;return r;}),
-        fj("https://thingproxy.freeboard.io/fetch/"+yUrl1,9000).then(j=>{const r=parseY(j);if(!r)throw 0;return r;}),
+        // --- allorigins (가장 안정적) ---
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl2),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- corsproxy.io ---
+        tf("https://corsproxy.io/?url="+encodeURIComponent(yUrl1),9000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?url="+encodeURIComponent(qUrl1),9000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- corsproxy.io 구버전 포맷 ---
+        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl2),9000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- thingproxy ---
+        tf("https://thingproxy.freeboard.io/fetch/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- cors.sh ---
+        tf("https://proxy.cors.sh/"+yUrl1,10000,{"x-cors-api-key":"temp_pf"})
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- crossorigin.me ---
+        tf("https://crossorigin.me/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- yacdn (대안 allorigins) ---
+        tf("https://yacdn.org/proxy/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
       ];
-      try{const result=await Promise.any(sources);return result;}catch(e){return null;}
+
+      try{
+        const result=await Promise.any(sources);
+        return result;
+      }catch(e){
+        // 1차 실패 → 2초 후 allorigins만 재시도
+        await new Promise(res=>setTimeout(res,2000));
+        try{
+          const retry=await Promise.any([
+            tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+            tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+          ]);
+          return retry;
+        }catch(e2){return null;}
+      }
     };
 
     // 5. ★★ 모든 종목 완전 병렬 실행 (배치 제거 - 빠른 결과부터 즉시 화면 반영)
     await Promise.allSettled(allTickers.map(async(tk)=>{
-      const result=await fetchOneTicker(tk,tickerMap[tk]);
+      const result=await fetchOneTicker(tk);
       if(result){
-        // 성공 즉시 화면 반영 (빠른 것부터)
         setPrices(prev=>{
           const next={...prev,[tk]:result};
           sv(SK_PRICES,next);
@@ -1307,34 +1319,52 @@ function App(){
     setForm({_acctId:acctTab,assetType:dt,currency:dt.includes("미국")?"USD":"KRW"});
     setEditIdx(null);setModal("holding");
   },[acctTab]);
-  // ★ 모달 열릴때 해당 티커 즉시 단독 조회 → 미리보기 즉시 표시
   // ★ 단일 티커 즉시 조회 (모달 열릴때, 항상 최신 시세)
   const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
     if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
     const tk=assetType==="국내ETF"?ticker+".KS":ticker;
-    const nowStr=new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
-    const fj=async(url,ms,h)=>{
+    const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
+    const tf=async(url,ms,hdrs)=>{
       const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch(url,{signal:c.signal,headers:h||{}});clearTimeout(t);if(!r.ok)throw new Error(r.status);const txt=await r.text();if(txt.startsWith("<"))throw new Error("html");return JSON.parse(txt);}
-      catch(e){clearTimeout(t);throw e;}
+      try{
+        const r=await fetch(url,{signal:c.signal,headers:hdrs||{}});
+        clearTimeout(t);if(!r.ok)throw new Error(r.status);
+        const txt=await r.text();if(!txt||txt.startsWith("<")||txt.startsWith("<!"))throw new Error("html");
+        return JSON.parse(txt);
+      }catch(e){clearTimeout(t);throw e;}
     };
-    const parseYahoo=(raw)=>{
-      const d=(raw&&raw.contents)?JSON.parse(raw.contents):raw;
-      const m=d?.chart?.result?.[0]?.meta;
-      if(m?.regularMarketPrice)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:nowStr};
-      return null;
+    const pV8=raw=>{
+      try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;
+        if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};}catch(e){}return null;
     };
-    const save=(r)=>{setPrices(prev=>{const next={...prev,[tk]:r};sv(SK_PRICES,next);return next;});};
-    const yUrl="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+    const pV7=raw=>{
+      try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];
+        if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};}catch(e){}return null;
+    };
+    const save=r=>{setPrices(prev=>{const next={...prev,[tk]:r};sv(SK_PRICES,next);return next;});};
+    const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+    const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+    const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+tk;
+    const q2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+tk;
     const sources=[
-      fj("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl),8000).then(j=>{const r=parseYahoo(j);if(!r)throw 0;return r;}),
-      fj("https://corsproxy.io/?"+encodeURIComponent(yUrl),10000).then(j=>{const r=parseYahoo(j);if(!r)throw 0;return r;}),
-      fj("https://proxy.cors.sh/"+yUrl,10000,{"x-cors-api-key":"temp_single"}).then(j=>{const r=parseYahoo(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y2),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q2),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?"+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?"+encodeURIComponent(q1),9000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://thingproxy.freeboard.io/fetch/"+y1,10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://proxy.cors.sh/"+y1,10000,{"x-cors-api-key":"temp_pf"}).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
     ];
-    if(!tk.endsWith(".KS")){
-
+    try{const r=await Promise.any(sources);if(r)save(r);}
+    catch(e){
+      await new Promise(res=>setTimeout(res,2000));
+      try{const r=await Promise.any([
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      ]);if(r)save(r);}catch(e2){}
     }
-    try{const r=await Promise.any(sources);if(r)save(r);}catch(e){}
   },[]);
 
   const openEdit=useCallback((aid,idx)=>{
@@ -1620,7 +1650,8 @@ function App(){
                       <span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.assetType}</span>
                       {!curAcct.directInput&&h.ticker&&<span style={{background:"#1e3250",padding:"2px 8px",borderRadius:5}}>{h.ticker}</span>}
                       {h.calcMode==="auto"&&h.pInfo&&h.pInfo.time&&<span style={{color:C.green,fontWeight:600}}>● 자동 {h.pInfo.time}</span>}
-                      {h.calcMode==="auto"&&h.pInfo&&!h.pInfo.time&&<span style={{color:"#f59e0b",fontWeight:600}}>● 이전시세</span>}
+                      {h.calcMode==="auto"&&h.pInfo&&!h.pInfo.time&&<span style={{color:"#f59e0b",fontWeight:600}}>● {fetching?"갱신중...":"이전시세"}</span>}
+                      {h.calcMode==="auto"&&!h.pInfo&&h.ticker&&<span style={{color:fetching?"#60a5fa":"#f59e0b",fontWeight:600}}>● {fetching?"⏳ 조회중...":"시세없음"}</span>}
                       {h.calcMode==="cma"&&<span style={{color:"#06b6d4",fontWeight:600}}>💳 CMA 이자 자동계산</span>}
                       {h.calcMode==="savings"&&<span style={{color:"#fb923c",fontWeight:600}}>💰 이자 자동계산</span>}
                       {h.calcMode==="fund"&&<span style={{color:C.green,fontWeight:600}}>📊 기준가 방식</span>}
