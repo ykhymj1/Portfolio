@@ -825,9 +825,9 @@ const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFx
     const result=await onFetchFx();
     setLoading(false);
     if(result){
-      showToast("환율 $1=₩"+result+" 갱신 완료!");
+      showToast("✅ 환율 $1=₩"+result+" 실시간 갱신!");
     }else{
-      showToast("환율 조회 실패. 네트워크를 확인해주세요.","error");
+      showToast("❌ 환율 조회 실패 - 네트워크 확인 후 재시도","error");
     }
   };
 
@@ -851,8 +851,8 @@ const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFx
             ?(<>
               <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:4}}>$1 = ₩{fxRate}</div>
               <div style={{fontSize:11,color:C.green}}>✅ 자동 업데이트 성공</div>
-              {fxTime&&<div style={{fontSize:12,color:C.accent,marginTop:3}}>⏱ 마지막 업데이트: <b style={{color:"#fbbf24"}}>{fxTime}</b></div>}
-              <div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: frankfurter.app / Yahoo Finance</div>
+              {fxTime&&<div style={{fontSize:12,color:C.accent,marginTop:3}}>⏱ 마지막 업데이트: <b style={{color:"#34d399"}}>{fxTime}</b></div>}
+              <div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: open.er-api.com / jsdelivr / Yahoo Finance</div>
             </>)
             :(<>
               <div style={{fontSize:13,color:C.sub}}>아직 자동 조회 전입니다.</div>
@@ -941,15 +941,28 @@ function App(){
     touchStartX.current=e.touches[0].clientX;
     touchStartY.current=e.touches[0].clientY;
   },[]);
+  // ★ 좌측 스와이프(뒤로가기) 브라우저 제스처 방지
+  const handleTouchMove=useCallback((e)=>{
+    const dx=touchStartX.current-e.touches[0].clientX;
+    const dy=touchStartY.current-e.touches[0].clientY;
+    // 왼쪽에서 오른쪽으로 당기는 제스처 (브라우저 뒤로가기) 방지
+    if(dx<-30&&Math.abs(dx)>Math.abs(dy)*1.5){
+      e.preventDefault();
+    }
+  },[]);
   const[pullRefreshing,setPullRefreshing]=useState(false);
   const handleTouchEnd=useCallback((e)=>{
     const dx=touchStartX.current-e.changedTouches[0].clientX;
     const dy=touchStartY.current-e.changedTouches[0].clientY;
-    // ★ Pull-to-Refresh: 상단 150px에서 아래로 80px 이상 당기면 갱신
-    if(touchStartY.current<150&&dy<-80&&Math.abs(dx)<50){
+    // ★ Pull-to-Refresh: 화면 최상단(scrollTop=0)에서 아래로 당기면 갱신
+    // dy<0: startY - endY < 0 → 아래로 당김 (endY > startY)
+    const scrollEl=document.getElementById("mainScroll");
+    const atTop=!scrollEl||scrollEl.scrollTop<=10;
+    if(atTop&&dy<-70&&Math.abs(dx)<60){
       if(!fetching&&!pullRefreshing){
         setPullRefreshing(true);
         fetchPrices(holdingsRef.current).finally(()=>setPullRefreshing(false));
+        showToast("🔄 갱신 중...");
       }
       return;
     }
@@ -1013,41 +1026,71 @@ function App(){
       try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time}));}catch(e){}
       return rounded;
     };
-    // 타임아웃 fetch 헬퍼 (ms)
-    const fetchTimeout=async(url,ms)=>{
+    const ft=async(url,ms)=>{
       const ctrl=new AbortController();
-      const t=setTimeout(()=>ctrl.abort(),ms);
-      try{
-        const r=await fetch(url,{signal:ctrl.signal});
-        clearTimeout(t);
-        return r;
-      }catch(e){clearTimeout(t);throw e;}
+      const t=setTimeout(()=>ctrl.abort(),ms||8000);
+      try{const r=await fetch(url,{signal:ctrl.signal});clearTimeout(t);return r;}
+      catch(e){clearTimeout(t);throw e;}
     };
-    // API1: frankfurter.app (ECB 공식, 빠름, CORS 완전지원)
+
+    // ★ API1: open.er-api.com (무료, CORS OK, KRW 지원 확실)
     try{
-      const r=await fetchTimeout("https://api.frankfurter.app/latest?from=USD&to=KRW",5000);
-      const j=await r.json();
-      const krw=j&&j.rates&&j.rates.KRW;
-      if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      const r=await ft("https://open.er-api.com/v6/latest/USD",6000);
+      if(r.ok){
+        const j=await r.json();
+        const krw=j&&j.result==="success"&&j.rates&&j.rates.KRW;
+        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      }
     }catch(e){}
-    // API2: open.er-api.com
+
+    // ★ API2: jsdelivr Fawazahmed0 currency (CDN, 완전무료, KRW 지원)
     try{
-      const r=await fetchTimeout("https://open.er-api.com/v6/latest/USD",5000);
-      const j=await r.json();
-      const krw=j&&j.rates&&j.rates.KRW;
-      if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      const r=await ft("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",6000);
+      if(r.ok){
+        const j=await r.json();
+        const krw=j&&j.usd&&j.usd.krw;
+        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      }
     }catch(e){}
-    // API3: Yahoo Finance via allorigins
+
+    // ★ API3: Yahoo Finance via allorigins (query1)
     try{
       const yu="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
-      const r=await fetchTimeout("https://api.allorigins.win/get?url="+encodeURIComponent(yu),8000);
-      const j=await r.json();
-      const raw=j&&j.contents?JSON.parse(j.contents):{};
-      const meta=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0]&&raw.chart.result[0].meta;
-      const krw=meta&&meta.regularMarketPrice;
-      if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      const r=await ft("https://api.allorigins.win/get?url="+encodeURIComponent(yu),8000);
+      if(r.ok){
+        const j=await r.json();
+        const raw=j&&j.contents?JSON.parse(j.contents):{};
+        const meta=raw&&raw.chart&&raw.chart.result&&raw.chart.result[0]&&raw.chart.result[0].meta;
+        const krw=meta&&meta.regularMarketPrice;
+        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      }
     }catch(e){}
-    return null;
+
+    // ★ API4: Yahoo Finance via codetabs (query2)
+    try{
+      const yu2="https://query2.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
+      const r=await ft("https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(yu2),8000);
+      if(r.ok){
+        const j=await r.json();
+        const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
+        const krw=meta&&meta.regularMarketPrice;
+        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      }
+    }catch(e){}
+
+    // ★ API5: corsproxy.io + Yahoo Finance
+    try{
+      const yu3="https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d";
+      const r=await ft("https://corsproxy.io/?"+encodeURIComponent(yu3),8000);
+      if(r.ok){
+        const j=await r.json();
+        const meta=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
+        const krw=meta&&meta.regularMarketPrice;
+        if(krw&&krw>500&&krw<5000)return applyFx(krw);
+      }
+    }catch(e){}
+
+    return null; // 모든 API 실패
   },[]);
 
   /* ★ 시세 조회 (ETF/주식) + 환율 동시 실행 */
@@ -1098,18 +1141,19 @@ function App(){
       // 시도 목록: [프록시URL, 파싱함수]
       const q1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
       const q2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      // ★ 여러 프록시 순차 시도 - 각 12초 타임아웃
+      // ★ 6개 프록시+도메인 조합 순차 시도
       const proxyList=[
-        ["https://api.allorigins.win/get?url="+encodeURIComponent(q1), parseWrapped],
-        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q1), parseYahoo],
-        ["https://corsproxy.io/?"+encodeURIComponent(q1), parseYahoo],
-        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped],
-        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q2), parseYahoo],
+        ["https://api.allorigins.win/get?url="+encodeURIComponent(q1), parseWrapped, 10000],
+        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q1), parseYahoo, 10000],
+        ["https://corsproxy.io/?"+encodeURIComponent(q1), parseYahoo, 10000],
+        ["https://api.allorigins.win/get?url="+encodeURIComponent(q2), parseWrapped, 10000],
+        ["https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(q2), parseYahoo, 10000],
+        ["https://corsproxy.io/?"+encodeURIComponent(q2), parseYahoo, 10000],
       ];
-      for(var i=0;i<proxyList.length;i++){
+      for(var pi=0;pi<proxyList.length;pi++){
         try{
-          const text=await doFetch(proxyList[i][0],12000);
-          const result=proxyList[i][1](text);
+          const text=await doFetch(proxyList[pi][0],proxyList[pi][2]);
+          const result=proxyList[pi][1](text);
           if(result)return result;
         }catch(e){}
       }
@@ -1341,19 +1385,19 @@ function App(){
 
   /* ★ 카드 상세 - 미국주식/ETF는 달러+원화 동시 표시 */
   const cardDet=(h,ac)=>{
-    if(ac.directInput)return[["투자원금",won(h.invested)],["평가금액",won(h.current)],["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]];
+    if(ac.directInput)return[["투자원금",won(h.invested)],["평가금액",won(h.current)],["수익금",`${h.pnl>0?"+":""}${won(h.pnl)}`]];
     if(h.calcMode==="cma")return[["원금",won(h.principal)],["경과",`${h.days||0}일`],["일이자",`+${won(h.dailyInterest)}`]];
     if(h.calcMode==="savings")return[["원금",won(h.principal)],["경과",`${h.days||0}일`],["이자",`+${won(h.pnl)}`]];
-    if(h.calcMode==="fund")return[["보유좌수",nf(h.qty)],["기준가",`${nf(parseFloat(h.nav||0).toFixed(2))}원`],["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]];
+    if(h.calcMode==="fund")return[["보유좌수",nf(h.qty)],["기준가",`${nf(parseFloat(h.nav||0).toFixed(2))}원`],["수익금",`${h.pnl>0?"+":""}${won(h.pnl)}`]];
     // ★ 미국주식/ETF: 달러+원화 동시
     if(h.currency==="USD"){
       return[
         ["평균단가",`${usd(h.avg)}\n${won(h.avgKRW)}`],
         ["현재가",`${usd(h.cur)}\n${won(h.curKRW)}`],
-        ["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]
+        ["수익금",`${h.pnl>0?"+":""}${won(h.pnl)}`]
       ];
     }
-    return[["평균단가",won(h.avg)],["현재가",won(h.cur)],["수익금",`${h.pnl>=0?"+":""}${won(h.pnl)}`]];
+    return[["평균단가",won(h.avg)],["현재가",won(h.cur)],["수익금",`${h.pnl>0?"+":""}${won(h.pnl)}`]];
   };
 
   const mins=Math.floor(countdown/60),secs=(countdown%60).toString().padStart(2,"0");
@@ -1361,8 +1405,10 @@ function App(){
   /* ── 렌더 ── */
   return(
     <div
-      style={{minHeight:"100vh",background:C.bg,color:C.text,paddingBottom:80}}
+      id="mainScroll"
+      style={{minHeight:"100vh",background:C.bg,color:C.text,paddingBottom:80,overflowY:"auto",WebkitOverflowScrolling:"touch"}}
       onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
       <Toast msg={toast?.msg} type={toast?.type}/>
