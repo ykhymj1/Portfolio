@@ -945,24 +945,32 @@ function App(){
   const handleTouchMove=useCallback((e)=>{
     const dx=touchStartX.current-e.touches[0].clientX;
     const dy=touchStartY.current-e.touches[0].clientY;
-    // 왼쪽에서 오른쪽으로 당기는 제스처 (브라우저 뒤로가기) 방지
+    // 브라우저 뒤로가기 제스처 방지
     if(dx<-30&&Math.abs(dx)>Math.abs(dy)*1.5){
       e.preventDefault();
     }
+    // 당기는 거리 시각적 표시 (120px 이상일 때 갱신)
+    const scrollEl=document.getElementById("mainScroll");
+    const atTop=!scrollEl||scrollEl.scrollTop<=5;
+    if(atTop&&dy<0&&Math.abs(dx)<80){
+      setPullDist(Math.min(Math.abs(dy),130));
+    }else{
+      setPullDist(0);
+    }
   },[]);
   const[pullRefreshing,setPullRefreshing]=useState(false);
+  const[pullDist,setPullDist]=useState(0); // 당기는 거리 표시용
   const handleTouchEnd=useCallback((e)=>{
     const dx=touchStartX.current-e.changedTouches[0].clientX;
     const dy=touchStartY.current-e.changedTouches[0].clientY;
-    // ★ Pull-to-Refresh: 화면 최상단(scrollTop=0)에서 아래로 당기면 갱신
-    // dy<0: startY - endY < 0 → 아래로 당김 (endY > startY)
+    setPullDist(0);
+    // ★ Pull-to-Refresh: 최상단에서 아래로 120px 이상 길게 당길 때만
     const scrollEl=document.getElementById("mainScroll");
-    const atTop=!scrollEl||scrollEl.scrollTop<=10;
-    if(atTop&&dy<-70&&Math.abs(dx)<60){
+    const atTop=!scrollEl||scrollEl.scrollTop<=5;
+    if(atTop&&dy<-120&&Math.abs(dx)<80){
       if(!fetching&&!pullRefreshing){
         setPullRefreshing(true);
         fetchPrices(holdingsRef.current).finally(()=>setPullRefreshing(false));
-        showToast("🔄 갱신 중...");
       }
       return;
     }
@@ -1105,158 +1113,117 @@ function App(){
     return null;
   },[]);
 
-  /* ★ 시세 조회 (ETF/주식) + 환율 동시 실행 */
+  /* ★ 시세 조회 - 완전 재작성 v5 */
   const fetchPrices=useCallback(async(hMap)=>{
     setFetching(true);
     const tickers=new Set();
     Object.entries(hMap).forEach(([aid,list])=>{
       const ac=ACCOUNTS.find(a=>a.id===aid);
-      if(ac?.cmaType)return; // CMA는 자체계산, 시세조회 불필요
+      if(ac?.cmaType)return;
       (list||[]).forEach(h=>{
         if(!h.ticker||!AUTO_TYPES.includes(h.assetType))return;
         tickers.add(h.assetType==="국내ETF"?h.ticker+".KS":h.ticker);
       });
     });
 
-    // ═══════════════════════════════════════════════
-    // ★ 시세 조회 핵심 로직 (완전 재작성)
-    // 전략: Yahoo v7 Quote API로 한번에 → 실패 시 개별 v8
-    // 프록시 Round-Robin으로 rate limit 방지
-    // ═══════════════════════════════════════════════
+    const allTickers=[...tickers];
+    if(allTickers.length===0){
+      await fetchFxRate();
+      setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
+      setCountdown(600);setFetching(false);return;
+    }
 
-    // 안전한 fetch (타임아웃 + text → JSON 파싱)
-    const safeFetch=async(url,ms)=>{
-      const ctrl=new AbortController();
-      const t=setTimeout(()=>ctrl.abort(),ms||10000);
+    // ── 핵심 유틸 ──
+    const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
+
+    // 안전 fetch: text→JSON (Content-Type 무관)
+    const sf=async(url,ms)=>{
+      const c=new AbortController();
+      const t=setTimeout(()=>c.abort(),ms);
       try{
-        const r=await fetch(url,{signal:ctrl.signal});
+        const r=await fetch(url,{signal:c.signal});
         clearTimeout(t);
-        if(!r.ok)throw new Error("HTTP "+r.status);
-        const txt=await r.text();
-        return JSON.parse(txt);
+        if(!r.ok)throw new Error(r.status);
+        return JSON.parse(await r.text());
       }catch(e){clearTimeout(t);throw e;}
     };
 
-    // 3개 프록시 URL 생성 (Round Robin용)
-    const makeProxyUrls=(yahooUrl)=>[
-      "https://api.allorigins.win/get?url="+encodeURIComponent(yahooUrl),
-      "https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(yahooUrl),
-      "https://corsproxy.io/?"+encodeURIComponent(yahooUrl),
-    ];
-
-    // allorigins는 {contents:"..."} wrapping → 내부 JSON 추출
-    const unwrap=(j)=>{
-      if(j&&j.contents){try{return JSON.parse(j.contents);}catch(e){}}
+    // allorigins wrapping 해제
+    const uw=(j)=>{
+      if(j&&typeof j.contents==="string"){try{return JSON.parse(j.contents);}catch(e){}}
       return j;
     };
 
-    // Yahoo v8 chart 응답에서 시세 추출
-    const parseV8=(j)=>{
+    // Yahoo v8 응답 파싱
+    const pv8=(j)=>{
       try{
-        const m=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
-        if(m&&m.regularMarketPrice)return{
+        const d=uw(j);
+        const m=d?.chart?.result?.[0]?.meta;
+        if(m?.regularMarketPrice)return{
           price:m.regularMarketPrice,
           prev:m.chartPreviousClose||m.regularMarketPrice,
           currency:m.currency||"KRW",
-          time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})
+          time:now()
         };
       }catch(e){}
       return null;
     };
 
-    // Yahoo v7 quote 응답에서 시세 추출
-    const parseV7=(j,tk)=>{
-      try{
-        const arr=j&&j.quoteResponse&&j.quoteResponse.result;
-        if(!arr)return null;
-        const q=arr.find(x=>x&&(x.symbol===tk||x.symbol===tk.replace(".KS","")));
-        if(q&&q.regularMarketPrice)return{
-          price:q.regularMarketPrice,
-          prev:q.regularMarketPreviousClose||q.regularMarketPrice,
-          currency:q.currency||"USD",
-          time:new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"})
-        };
-      }catch(e){}
-      return null;
-    };
-
-    // 단일 프록시로 v8 요청 (fallback용)
-    const fetchV8Single=async(tk,proxyIdx)=>{
-      const yUrl="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      const yUrl2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
-      const proxies=makeProxyUrls(yUrl);
-      const proxies2=makeProxyUrls(yUrl2);
-      // 지정된 프록시 먼저, 나머지 순서대로
-      const order=[proxyIdx,(proxyIdx+1)%3,(proxyIdx+2)%3];
-      for(const pi of order){
-        try{const j=await safeFetch(proxies[pi],12000);const r=parseV8(unwrap(j));if(r)return r;}catch(e){}
-        try{const j=await safeFetch(proxies2[pi],12000);const r=parseV8(unwrap(j));if(r)return r;}catch(e){}
+    // 단일 티커 조회: 3개 프록시 × 2개 도메인 = 최대 6회 시도
+    // 종목별로 즉시 setPrices 업데이트 (빠른 화면 반영)
+    const fetchOne=async(tk,proxyOffset)=>{
+      const PROXIES=[
+        (u)=>"https://api.allorigins.win/get?url="+encodeURIComponent(u),
+        (u)=>"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u),
+        (u)=>"https://corsproxy.io/?"+encodeURIComponent(u),
+      ];
+      const DOMS=[
+        "https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",
+        "https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d",
+      ];
+      // proxyOffset으로 시작 프록시 분산 (rate limit 방지)
+      const pOrder=[(proxyOffset)%3,(proxyOffset+1)%3,(proxyOffset+2)%3];
+      for(const pi of pOrder){
+        for(const dom of DOMS){
+          try{
+            const j=await sf(PROXIES[pi](dom),8000);
+            const r=pv8(j);
+            if(r){
+              // ★ 성공 즉시 화면 업데이트 (기다리지 않음)
+              setPrices(prev=>{
+                const next={...prev,[tk]:r};
+                sv(SK_PRICES,next);
+                return next;
+              });
+              return r;
+            }
+          }catch(e){}
+        }
       }
       return null;
     };
 
-    const allTickers=[...tickers];
-    const newP={};
-    const now2=Date.now();
-
-    // ━━━ STEP 1: Yahoo v7 Quote API로 한번에 조회 ━━━
-    // 미국 주식/ETF는 symbols=A,B,C 형태로 한번에
-    const usTickers=allTickers.filter(tk=>!tk.endsWith(".KS"));
-    const krTickers=allTickers.filter(tk=>tk.endsWith(".KS"));
-
-    if(usTickers.length>0){
-      const symbols=usTickers.join(",");
-      const v7Url="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+encodeURIComponent(symbols)+"&fields=regularMarketPrice,regularMarketPreviousClose,currency";
-      const v7Proxies=makeProxyUrls(v7Url);
-      let v7Done=false;
-
-      for(let pi=0;pi<v7Proxies.length&&!v7Done;pi++){
-        try{
-          const j=await safeFetch(v7Proxies[pi],15000);
-          const data=unwrap(j);
-          if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0){
-            let gotCount=0;
-            usTickers.forEach(tk=>{
-              const r=parseV7(data,tk);
-              if(r){newP[tk]=r;gotCount++;}
-            });
-            if(gotCount>0){v7Done=true;}
-          }
-        }catch(e){}
-      }
-
-      // v7 실패 또는 일부 누락된 종목 → v8로 개별 조회
-      const missing=usTickers.filter(tk=>!newP[tk]);
-      if(missing.length>0){
-        // Round Robin: 각 종목에 다른 프록시 할당
-        await Promise.allSettled(missing.map(async(tk,idx)=>{
-          // 300ms 간격으로 요청 (rate limit 방지)
-          await new Promise(res=>setTimeout(res,idx*300));
-          const r=await fetchV8Single(tk,idx%3);
-          if(r)newP[tk]=r;
-        }));
-      }
-    }
-
-    // ━━━ STEP 2: 국내ETF는 .KS 붙여서 개별 조회 ━━━
-    if(krTickers.length>0){
-      await Promise.allSettled(krTickers.map(async(tk,idx)=>{
-        await new Promise(res=>setTimeout(res,idx*400));
-        const r=await fetchV8Single(tk,idx%3);
-        if(r)newP[tk]=r;
-      }));
-    }
-
-        setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
+    // ── 환율 + 모든 종목 동시 병렬 실행 ──
+    // 환율: fetchFxRate() 동시
+    // 종목: 50ms 엇갈림으로 프록시 rate limit 방지
+    await Promise.allSettled([
+      fetchFxRate(),
+      ...allTickers.map((tk,idx)=>
+        new Promise(res=>setTimeout(()=>fetchOne(tk,idx%3).then(res),idx*50))
+      )
+    ]);
+    setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
     setCountdown(600);setFetching(false);
   },[fetchFxRate]);
 
   // eslint-disable-next-line
   useEffect(()=>{
-    // ★ 캐시 복원은 useState 초기값에서 이미 완료
-    // 백그라운드에서 최신 시세 갱신 (약간 딜레이 후 시작 - UI 먼저 그리기)
-    const t=setTimeout(()=>fetchPrices(holdingsRef.current), 200);
-    return()=>clearTimeout(t);
+    // ★ 캐시 복원은 이미 완료 → 즉시 갱신 시작
+    // requestAnimationFrame으로 UI 한번 그린 후 바로 시작
+    const raf=requestAnimationFrame(()=>{
+      fetchPrices(holdingsRef.current);
+    });
+    return()=>cancelAnimationFrame(raf);
   },[]);
   useEffect(()=>{
     const t=setInterval(()=>setCountdown(c=>{if(c<=1){fetchPrices(holdingsRef.current);return 600;}return c-1;}),1000);
@@ -1477,13 +1444,19 @@ function App(){
     >
       <Toast msg={toast?.msg} type={toast?.type}/>
       {/* ★ Pull-to-Refresh 인디케이터 */}
-      {pullRefreshing&&(
-        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:999,background:"linear-gradient(180deg,#1d4ed8,transparent)",height:4,animation:"slideDown .3s ease"}}>
-          <div style={{height:"100%",background:"#60a5fa",animation:"pulse 1s infinite"}}/>
+      {/* Pull-to-Refresh 진행 표시 */}
+      {(pullRefreshing||pullDist>20)&&(
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:999,height:3,background:"#1e3250"}}>
+          <div style={{height:"100%",background:pullRefreshing?"#60a5fa":"#3b82f6",width:pullRefreshing?"100%":(pullDist/130*100)+"%",transition:pullRefreshing?"none":"width .1s"}}/>
+        </div>
+      )}
+      {pullDist>20&&!pullRefreshing&&(
+        <div style={{position:"fixed",top:8,left:"50%",transform:"translateX(-50%)",zIndex:998,background:"#1e3a5f",borderRadius:20,padding:"6px 16px",fontSize:12,color:"#60a5fa",fontWeight:700,boxShadow:"0 2px 12px #00000050"}}>
+          {pullDist>=120?"🔄 놓으면 갱신":"↓ 더 당기면 갱신 ("+(Math.round(pullDist/120*100))+"%)"}
         </div>
       )}
       {pullRefreshing&&(
-        <div style={{position:"fixed",top:50,left:"50%",transform:"translateX(-50%)",zIndex:998,background:"#1d4ed8",borderRadius:20,padding:"8px 18px",fontSize:13,color:"#fff",fontWeight:700,boxShadow:"0 4px 20px #00000060"}}>
+        <div style={{position:"fixed",top:8,left:"50%",transform:"translateX(-50%)",zIndex:998,background:"#1d4ed8",borderRadius:20,padding:"6px 16px",fontSize:12,color:"#fff",fontWeight:700,boxShadow:"0 2px 12px #00000060"}}>
           🔄 갱신 중...
         </div>
       )}
