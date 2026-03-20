@@ -1038,26 +1038,36 @@ function App(){
         throw new Error('invalid');
       }catch(e){clearTimeout(t);throw e;}
     };
-    const tryFetchNamed=async(name,url,extract)=>{const v=await tryFetch(url,extract);return{v,name};};
-    const sources=[
-      // exconvert.com 메인
-      (async()=>{
-        const c=new AbortController();const t=setTimeout(()=>c.abort(),6000);
-        try{
-          const r=await fetch("https://api.exconvert.com/convert?access_key=cd94debe-e32c0a05-7ec91d21-86dcf56a&from=USD&to=KRW&amount=1",{signal:c.signal});
-          clearTimeout(t);
-          const d=await r.json();
-          const v=d?.result?.KRW??d?.result?.rate;
-          if(isValid(v))return{v:Math.round(v),name:"exconvert.com"};
-          throw new Error('invalid');
-        }catch(e){clearTimeout(t);throw e;}
-      })(),
-      tryFetchNamed("exchangerate-api.com","https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
-      tryFetchNamed("open.er-api.com","https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
-      tryFetchNamed("jsdelivr(fawazahmed0)","https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
-    ];
+    // ★ exconvert 우선 순차 시도 → 실패 시 폴백
+    const tryFetchNamed=async(name,url,extract)=>{
+      const v=await tryFetch(url,extract);return{v,name};
+    };
+    const tryExconvert=async()=>{
+      const c=new AbortController();const t=setTimeout(()=>c.abort(),10000);
+      try{
+        const r=await fetch("https://api.exconvert.com/convert?access_key=cd94debe-e32c0a05-7ec91d21-86dcf56a&from=USD&to=KRW&amount=1",{signal:c.signal});
+        clearTimeout(t);
+        const d=await r.json();
+        const v=d?.result?.KRW??d?.result?.rate;
+        if(isValid(v))return{v:Math.round(v),name:"exconvert.com"};
+        throw new Error('invalid');
+      }catch(e){clearTimeout(t);throw e;}
+    };
+    let result=null;
+    try{ result=await tryExconvert(); }catch(e){}
+    if(!result){
+      // exconvert 실패 시에만 폴백 소스 병렬 시도
+      try{
+        result=await Promise.any([
+          tryFetchNamed("exchangerate-api.com","https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
+          tryFetchNamed("open.er-api.com","https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
+          tryFetchNamed("jsdelivr(fawazahmed0)","https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
+        ]);
+      }catch(e){}
+    }
     try{
-      const{v:rounded,name:srcName}=await Promise.any(sources);
+      if(!result)return null;
+      const{v:rounded,name:srcName}=result;
       const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
       setFxRate(rounded);fxRateRef.current=rounded;setFxAuto(true);setFxTime(time);setFxSource(srcName);
       try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time,source:srcName}));}catch(e){}
