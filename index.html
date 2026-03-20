@@ -993,7 +993,13 @@ function App(){
     try{
       const hist=ld(SK_HISTORY,{});
       const snap={total:{invested:myTotal.invested,current:myTotal.current}};
-      allAccounts.forEach(ac=>{const r=ac.shared ? 0.5 : 1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
+      allAccounts.forEach(ac=>{
+        const r=ac.shared ? 0.5 : 1;
+        snap[ac.id]={
+          invested:ac.cmaType?0:ac.invested*r,
+          current:ac.current*r  // 총금액은 모두 포함
+        };
+      });
       hist[today]=snap;
       const keys=Object.keys(hist).sort();
       if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
@@ -1256,12 +1262,25 @@ function App(){
     return acctOrder.map(id=>base.find(a=>a.id===id)).filter(Boolean);
   },[calcAcct,acctOrder]);
 
-  /* ★ 내 총자산 (AMT 1/2 + 나머지) */
+  /* ★ 내 총자산 계산
+     - 총금액(current): AMT×½ + AMT CMA×½ + MyAMT + 일반 + 퇴직 + IRP + ISA + MyCMA (전체 포함)
+     - 투자원금(invested): AMT×½ + MyAMT + 일반 + 퇴직 + IRP + ISA (CMA 전체 제외)
+     - 수익금(pnl): AMT×½ + MyAMT + 일반 + 퇴직 + IRP + ISA (CMA 전체 제외)
+  */
   const myTotal=useMemo(()=>allAccounts.reduce((s,ac)=>{
     const r=ac.shared ? 0.5 : 1;
-    return{invested:s.invested+ac.invested*r,current:s.current+ac.current*r};
+    return{
+      // 총금액: 모든 계좌 포함 (AMT·AMT CMA는 ×½)
+      current: s.current + ac.current*r,
+      // 투자원금: CMA 전체 제외
+      invested: s.invested + (ac.cmaType ? 0 : ac.invested*r),
+    };
   },{invested:0,current:0}),[allAccounts]);
-  const myPnl=myTotal.current-myTotal.invested;
+  const myPnl=useMemo(()=>allAccounts.reduce((s,ac)=>{
+    if(ac.cmaType)return s; // CMA 수익금 제외
+    const r=ac.shared ? 0.5 : 1;
+    return s+(ac.current-ac.invested)*r;
+  },0),[allAccounts]);
   const myPct=myTotal.invested>0?myPnl/myTotal.invested*100:0;
 
   const curAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===acctTab),[acctTab]);
@@ -1460,16 +1479,16 @@ function App(){
         <div style={{fontSize:10,color:C.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>MY PORTFOLIO</div>
         <div style={{fontSize:34,fontWeight:800,color:"#fff",letterSpacing:-1.5,lineHeight:1.1}}>{won(myTotal.current)}</div>
         <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,flexWrap:"wrap"}}>
-          <span style={{fontSize:13,color:C.sub}}>내 투자원금 {won(myTotal.invested)}</span>
+          <span style={{fontSize:13,color:C.sub}}>투자원금(CMA제외) {won(myTotal.invested)}</span>
           <ProfitBadge pct={myPct} pnl={myPnl} size="lg"/>
         </div>
 
-        {/* ★ KPI 카드 3개 (총투자원금 / 총수익률 / 총수익금액) */}
+        {/* ★ KPI 카드 3개 */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:14}}>
           {[
-            {label:"총 투자원금",value:won(myTotal.invested),color:C.sub},
-            {label:"총 수익률",value:pf(myPct),color:myPct>=0?C.up:C.dn},
-            {label:"총 수익금액",value:`${myPnl>=0?"+":""}${won(myPnl)}`,color:myPnl>=0?C.up:C.dn},
+            {label:"투자원금 (CMA제외)",value:won(myTotal.invested),color:C.sub},
+            {label:"수익률 (CMA제외)",value:pf(myPct),color:myPct>=0?C.up:C.dn},
+            {label:"수익금 (CMA제외)",value:`${myPnl>=0?"+":""}${won(myPnl)}`,color:myPnl>=0?C.up:C.dn},
           ].map((k,i)=>(
             <div key={i} style={{background:"rgba(255,255,255,0.05)",borderRadius:12,padding:"10px 10px",border:"1px solid rgba(255,255,255,0.08)",textAlign:"center"}}>
               <div style={{fontSize:9,color:C.muted,marginBottom:5,letterSpacing:.3}}>{k.label}</div>
@@ -1478,7 +1497,7 @@ function App(){
           ))}
         </div>
         <div style={{fontSize:10,color:C.muted,marginTop:6}}>
-          ※ AMT계좌·AMT CMA는 공동계좌 → 각 1/2만 내 총자산에 포함 · {fetching&&!fxAuto?"⏳ 환율 조회중...":fxAuto?`$1=₩${fxRate} · 환율 ${fxTime}`:`$1=₩${fxRate}`}
+          ※ 총금액=전체계좌합산(AMT·AMTCMA는½) · 투자원금·수익=CMA제외 · {fetching&&!fxAuto?"⏳ 환율 조회중...":fxAuto?`$1=₩${fxRate} · ${fxTime}`:`$1=₩${fxRate}`}
         </div>
 
         {/* 자동갱신 바 */}
