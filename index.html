@@ -937,10 +937,9 @@ function App(){
   const[editingItemOrder,setEditingItemOrder]=useState(false);
   const holdingsRef=useRef(holdings);
   useEffect(()=>{holdingsRef.current=holdings;},[holdings]);
-  const fxRateRef=useRef(fxRate);
+  // ★ fxRateRef: 환율을 ref로도 유지 → fetchPrices 내 클로저에서 최신값 즉시 사용
+  const fxRateRef=useRef(fxRate); // 초기값이 캐시에서 복원됐으므로 즉시 정확한 값
   useEffect(()=>{fxRateRef.current=fxRate;},[fxRate]);
-  // ★ fetchPricesRef: 타이머 클로저에서 항상 최신 fetchPrices 참조
-  const fetchPricesRef=useRef(null);
   const fileRef=useRef(null);
 
   /* ★ 스와이프 핸들러 */
@@ -970,17 +969,18 @@ function App(){
     if(diffY>90&&window.scrollY===0&&diffX<80){
       if(!fetching&&!pullRefreshing){
         setPullRefreshing(true);
-        if(fetchPricesRef.current)fetchPricesRef.current(holdingsRef.current).finally(()=>setPullRefreshing(false));
+        fetchPrices(holdingsRef.current).finally(()=>setPullRefreshing(false));
       }
       return;
     }
+    // 탭 스와이프: 수평 80px+ AND 수평>수직×2
     const dx=touchStartX.current-endX;
     if(Math.abs(dx)<80||Math.abs(dx)<Math.abs(diffY)*2)return;
     if(tab==="accounts")return;
     const idx=TABS.indexOf(tab);
     if(dx>0&&idx<TABS.length-1)setTab(TABS[idx+1]);
     else if(dx<0&&idx>0)setTab(TABS[idx-1]);
-  },[tab,fetching,pullRefreshing]);
+  },[tab,fetching,pullRefreshing,fetchPrices]);
 
   useEffect(()=>{sv(SK,{holdings,fxRate});},[holdings,fxRate]);
 
@@ -993,13 +993,7 @@ function App(){
     try{
       const hist=ld(SK_HISTORY,{});
       const snap={total:{invested:myTotal.invested,current:myTotal.current}};
-      allAccounts.forEach(ac=>{
-        const r=ac.shared ? 0.5 : 1;
-        snap[ac.id]={
-          invested:ac.cmaType?0:ac.invested*r,
-          current:ac.current*r  // 총금액은 모두 포함
-        };
-      });
+      allAccounts.forEach(ac=>{const r=ac.shared ? 0.5 : 1;snap[ac.id]={invested:ac.invested*r,current:ac.current*r};});
       hist[today]=snap;
       const keys=Object.keys(hist).sort();
       if(keys.length>366)keys.slice(0,keys.length-366).forEach(k=>delete hist[k]);
@@ -1026,51 +1020,41 @@ function App(){
   },[tab]);
   const showToast=useCallback((msg,type="success")=>setToast({msg,type}),[]);
 
-  /* ★ 환율 조회 */
+  /* ★ 환율 조회 - 6개 소스 Promise.any 완전 병렬 (가장 빠른 것 즉시 사용) */
   const fetchFxRate=useCallback(async()=>{
     const isValid=v=>v&&v>500&&v<5000;
-    const EXCONVERT_KEY="cd94debe-e32c0a05-7ec91d21-86dcf56a";
-    const go=async(url,ms)=>{
-      const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch("https://api.allorigins.win/get?url="+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const j=await r.json();if(!j?.contents)throw 0;return JSON.parse(j.contents);}
-      catch(e){clearTimeout(t);throw e;}
+    const tryFetch=async(url,extract)=>{
+      const c=new AbortController();
+      const t=setTimeout(()=>c.abort(),6000);
+      try{
+        const r=await fetch(url,{signal:c.signal});
+        clearTimeout(t);
+        const d=await r.json();
+        const v=extract(d);
+        if(isValid(v))return Math.round(v);
+        throw new Error('invalid');
+      }catch(e){clearTimeout(t);throw e;}
     };
-    const go2=async(url,ms)=>{
-      const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch("https://corsproxy.io/?"+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const txt=await r.text();if(!txt||txt.startsWith("<"))throw 0;return JSON.parse(txt);}
-      catch(e){clearTimeout(t);throw e;}
-    };
-    // ExConvert 직접 호출 (CORS 허용)
-    const goEx=async(url,ms)=>{
-      const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch(url,{signal:c.signal});clearTimeout(t);const txt=await r.text();if(!txt||txt.startsWith("<"))throw 0;return JSON.parse(txt);}
-      catch(e){clearTimeout(t);throw e;}
-    };
-    const extract=d=>{
-      const toNum=s=>parseFloat(String(s||"0").replace(/,/g,""))||0;
-      // ExConvert 응답: { base:"USD", result:{ KRW: 1375.5 }, rate: 1375.5 }
-      if(d?.result?.KRW){const v=toNum(d.result.KRW);if(isValid(v))return Math.round(v);}
-      if(d?.rate){const v=toNum(d.rate);if(isValid(v))return Math.round(v);}
-      if(d?.datas?.[0]){const v=toNum(d.datas[0].nv||d.datas[0].closePrice||d.datas[0].currentPrice);if(isValid(v))return Math.round(v);}
-      const fields=[d?.rates?.KRW,d?.usd?.krw,d?.currentPrice,d?.closePrice,d?.krw];
-      for(const f of fields){const v=toNum(f);if(isValid(v))return Math.round(v);}
-      return null;
-    };
-    const exUrl1="https://api.exconvert.com/fetchOne?base=USD&to=KRW&access_key="+EXCONVERT_KEY;
-    const exUrl2="https://api.exconvert.com/convert?from=USD&to=KRW&amount=1&access_key="+EXCONVERT_KEY;
+    const sources=[
+      // exconvert.com 메인 - {"base":"USD","amount":"1","result":{"KRW":1456.12,"rate":1456.12}}
+      (async()=>{
+        const c=new AbortController();const t=setTimeout(()=>c.abort(),6000);
+        try{
+          const r=await fetch("https://exconvert.com/api/convert?from=USD&to=KRW&amount=1&accessKey=cd94debe-e32c0a05-7ec91d21-86dcf56a",{signal:c.signal});
+          clearTimeout(t);
+          const d=await r.json();
+          const v=d?.result?.KRW??d?.result?.rate;
+          if(isValid(v))return Math.round(v);
+          throw new Error('invalid');
+        }catch(e){clearTimeout(t);throw e;}
+      })(),
+      // 무료 폴백 소스들
+      tryFetch("https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
+      tryFetch("https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
+      tryFetch("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
+    ];
     try{
-      const rounded=await Promise.any([
-        // ★ ExConvert 1순위 (무제한 무료)
-        goEx(exUrl1,5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        goEx(exUrl2,5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go(exUrl1,6000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        // 기존 백업
-        go("https://polling.finance.naver.com/api/realtime/worldstock/marketIndex/FX_USDKRW",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go("https://m.stock.naver.com/api/forex/usdkrw",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go2("https://api.exchangerate-api.com/v4/latest/USD",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go("https://open.er-api.com/v6/latest/USD",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-      ]);
+      const rounded=await Promise.any(sources);
       const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
       setFxRate(rounded);fxRateRef.current=rounded;setFxAuto(true);setFxTime(time);
       try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time}));}catch(e){}
@@ -1078,130 +1062,129 @@ function App(){
     }catch(e){return null;}
   },[]);
 
-  /* ★ 시세 조회 - 국내ETF: 네이버증권, 미국주식/ETF: Yahoo Finance */
+  /* ★ 시세 조회 v6 - Promise.race 병렬 우선 + 순차 폴백 */
   const fetchPrices=useCallback(async(hMap)=>{
     setFetching(true);
 
-    // 1. 고유 티커 수집 (중복 제거) — 국내/해외 분리
-    const krMap={};  // { "069500": "국내ETF" }
-    const usMap={};  // { "AAPL": "미국주식" }
+    // 1. 고유 티커 수집 (중복 제거)
+    const tickerMap={};
     Object.entries(hMap).forEach(([aid,list])=>{
       const ac=ACCOUNTS.find(a=>a.id===aid);
       if(ac?.cmaType)return;
       (list||[]).forEach(h=>{
         if(!h.ticker||!AUTO_TYPES.includes(h.assetType))return;
-        if(h.assetType==="국내ETF") krMap[h.ticker]=h.assetType;
-        else usMap[h.ticker]=h.assetType;
+        const tk=h.assetType==="국내ETF"?h.ticker+".KS":h.ticker;
+        tickerMap[tk]=h.assetType;
       });
     });
-    const allTickers=[
-      ...Object.keys(krMap).map(t=>({tk:t,type:"KR"})),
-      ...Object.keys(usMap).map(t=>({tk:t,type:"US"})),
-    ];
+    const allTickers=Object.keys(tickerMap);
 
     // 종목 없으면 종료
     if(allTickers.length===0){
       setLastUp(new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"}));
-      const d0=new Date(),h0=d0.getHours(),day0=d0.getDay();
-      setCountdown((day0>0&&day0<6&&h0>=9&&h0<16)?180:600);
-      setFetching(false);return;
+      setCountdown(600);setFetching(false);return;
     }
 
-    const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
-    const toNum=s=>parseFloat(String(s||"0").replace(/,/g,""))||0;
+    // 4. ★★ 단일 티커 조회: 최대한 많은 루트로 병렬 시도 (성공률 극대화)
+    const fetchOneTicker=async(tk)=>{
+      const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
+      const yUrl1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+      const yUrl2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+      const qUrl1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+tk;
+      const qUrl2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+tk;
 
-    // ── 공통 fetch 유틸 (타임아웃 + allorigins contents 자동 언래핑) ──
-    const go=async(url,ms)=>{
-      const aoUrl="https://api.allorigins.win/get?url="+encodeURIComponent(url);
-      const c=new AbortController();
-      const t=setTimeout(()=>c.abort(),ms);
+      // fetch with timeout
+      const tf=async(url,ms,hdrs)=>{
+        const c=new AbortController();
+        const t=setTimeout(()=>c.abort(),ms);
+        try{
+          const r=await fetch(url,{signal:c.signal,headers:hdrs||{"User-Agent":"Mozilla/5.0"}});
+          clearTimeout(t);
+          if(!r.ok)throw new Error(r.status);
+          const txt=await r.text();
+          if(!txt||txt.startsWith("<")||txt.startsWith("<!"))throw new Error("html");
+          return JSON.parse(txt);
+        }catch(e){clearTimeout(t);throw e;}
+      };
+
+      // v8 chart 파싱
+      const pV8=raw=>{
+        try{
+          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+          const m=d?.chart?.result?.[0]?.meta;
+          if(m?.regularMarketPrice&&m.regularMarketPrice>0)
+            return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};
+        }catch(e){}
+        return null;
+      };
+      // v7 quote 파싱
+      const pV7=raw=>{
+        try{
+          const d=(raw?.contents)?JSON.parse(raw.contents):raw;
+          const q=d?.quoteResponse?.result?.[0];
+          if(q?.regularMarketPrice&&q.regularMarketPrice>0)
+            return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};
+        }catch(e){}
+        return null;
+      };
+
+      // 모든 소스 동시 시도
+      const sources=[
+        // --- allorigins (가장 안정적) ---
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl2),8000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl2),8000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- corsproxy.io ---
+        tf("https://corsproxy.io/?url="+encodeURIComponent(yUrl1),9000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?url="+encodeURIComponent(qUrl1),9000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- corsproxy.io 구버전 포맷 ---
+        tf("https://corsproxy.io/?"+encodeURIComponent(yUrl1),9000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://corsproxy.io/?"+encodeURIComponent(qUrl2),9000)
+          .then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+        // --- thingproxy ---
+        tf("https://thingproxy.freeboard.io/fetch/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- cors.sh ---
+        tf("https://proxy.cors.sh/"+yUrl1,10000,{"x-cors-api-key":"temp_pf"})
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- crossorigin.me ---
+        tf("https://crossorigin.me/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        // --- yacdn (대안 allorigins) ---
+        tf("https://yacdn.org/proxy/"+yUrl1,10000)
+          .then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      ];
+
       try{
-        const r=await fetch(aoUrl,{signal:c.signal});
-        clearTimeout(t);
-        const j=await r.json();
-        if(!j?.contents)throw new Error("empty");
-        return JSON.parse(j.contents); // ← JSON만 파싱 (HTML이면 여기서 throw → 다음 소스로)
-      }catch(e){clearTimeout(t);throw e;}
-    };
-    const go2=async(url,ms)=>{
-      const cpUrl="https://corsproxy.io/?"+encodeURIComponent(url);
-      const c=new AbortController();
-      const t=setTimeout(()=>c.abort(),ms);
-      try{
-        const r=await fetch(cpUrl,{signal:c.signal});
-        clearTimeout(t);
-        const txt=await r.text();
-        if(!txt||txt.startsWith("<"))throw new Error("html");
-        return JSON.parse(txt);
-      }catch(e){clearTimeout(t);throw e;}
+        const result=await Promise.any(sources);
+        return result;
+      }catch(e){
+        // 1차 실패 → 2초 후 allorigins만 재시도
+        await new Promise(res=>setTimeout(res,2000));
+        try{
+          const retry=await Promise.any([
+            tf("https://api.allorigins.win/get?url="+encodeURIComponent(yUrl1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+            tf("https://api.allorigins.win/get?url="+encodeURIComponent(qUrl1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+          ]);
+          return retry;
+        }catch(e2){return null;}
+      }
     };
 
-    // Yahoo v8 파서
-    const pYv8=d=>{
-      try{const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};}catch(e){}return null;
-    };
-    // Yahoo v7 파서
-    const pYv7=d=>{
-      try{const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};}catch(e){}return null;
-    };
-    // 네이버 파서
-    const pNav=(d,cur)=>{
-      try{
-        if(d?.datas?.[0]){const s=d.datas[0];const p=toNum(s.nv||s.currentPrice||s.closePrice);if(p>0)return{price:p,prev:toNum(s.sv||p),currency:cur,time:now()};}
-        const p=toNum(d?.currentPrice||d?.closePrice||d?.stockPrice||d?.tradePrice);
-        if(p>0)return{price:p,prev:toNum(d?.prevClosingPrice||d?.basePrice||p),currency:cur,time:now()};
-      }catch(e){}return null;
-    };
-
-    // ── 국내ETF: 네이버 1순위(allorigins), Yahoo .KS 백업 — Promise.any로 가장 빠른 것 즉시 사용 ──
-    const fetchKR=async(ticker)=>{
-      const code=ticker.replace(".KS","");
-      const yTk=code+".KS";
-      const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
-      const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
-      const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+yTk;
-      const nPoll="https://polling.finance.naver.com/api/realtime/domestic/stock/"+code;
-      const nBasic="https://m.stock.naver.com/api/stock/"+code+"/basic";
-      try{
-        return await Promise.any([
-          go(nPoll,6000).then(d=>{const v=pNav(d,"KRW");if(!v)throw 0;return v;}),
-          go2(nBasic,6000).then(d=>{const v=pNav(d,"KRW");if(!v)throw 0;return v;}),
-          go(y1,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go2(y1,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go(q1,7000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-          go2(y2,8000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        ]);
-      }catch(e){return null;}
-    };
-
-    // ── 미국주식/ETF: Yahoo 1순위, 네이버 해외 백업 — Promise.any로 가장 빠른 것 즉시 사용 ──
-    const fetchUS=async(ticker)=>{
-      const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
-      const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+ticker+"?interval=1d&range=1d";
-      const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
-      const q2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+ticker;
-      const nUrl="https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker;
-      try{
-        return await Promise.any([
-          go(y1,6000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go2(y1,6000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go(q1,6000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-          go2(q1,6000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-          go(y2,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go2(y2,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-          go(q2,7000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-          go(nUrl,7000).then(d=>{const v=pNav(d,"USD");if(!v)throw 0;return v;}),
-        ]);
-      }catch(e){return null;}
-    };
-
-    // 모든 종목 완전 병렬 (국내/해외 각각 적합한 API 사용)
-    await Promise.allSettled(allTickers.map(async({tk,type})=>{
-      const storeKey=type==="KR"?tk+".KS":tk;
-      const result=type==="KR"?await fetchKR(tk):await fetchUS(tk);
+    // 5. ★★ 모든 종목 완전 병렬 실행 (배치 제거 - 빠른 결과부터 즉시 화면 반영)
+    await Promise.allSettled(allTickers.map(async(tk)=>{
+      const result=await fetchOneTicker(tk);
       if(result){
         setPrices(prev=>{
-          const next={...prev,[storeKey]:result};
+          const next={...prev,[tk]:result};
           sv(SK_PRICES,next);
           return next;
         });
@@ -1212,15 +1195,13 @@ function App(){
     const d2=new Date(),h2=d2.getHours(),day2=d2.getDay();
     setCountdown((day2>0&&day2<6&&h2>=9&&h2<16)?180:600);
     setFetching(false);
-  },[]);//eslint-disable-line react-hooks/exhaustive-deps
-  // ★ fetchPricesRef 항상 최신으로 유지
-  useEffect(()=>{fetchPricesRef.current=fetchPrices;},[fetchPrices]);
+  },[fetchFxRate]);
 
   // ★ 초기 로딩 + 스마트 환율/시세 자동갱신
   // eslint-disable-next-line
   useEffect(()=>{
     // 1. 초기: 10ms 후 시세 갱신 시작
-    const initT=setTimeout(()=>{fetchPricesRef.current&&fetchPricesRef.current(holdingsRef.current);},10);
+    const initT=setTimeout(()=>{fetchPrices(holdingsRef.current);},10);
     // 2. 환율: 앱 시작 즉시 + 장중(6~22시) 30초 / 그 외 3분 스마트 갱신
     fetchFxRate();
     const getFxInterval=()=>{const h=new Date().getHours();return(h>=6&&h<22)?30000:180000;};
@@ -1229,7 +1210,7 @@ function App(){
     scheduleFx();
     return()=>{clearTimeout(initT);if(fxTimerRef.id)clearTimeout(fxTimerRef.id);};
   },[]);
-  // ★ 시세 카운트다운: ref 통해 호출 → 클로저 문제 없음
+  // ★ 시세 카운트다운: 평일 장중(9~16시) 3분 / 그 외 10분
   const getRefreshInterval=()=>{
     const d=new Date(),h=d.getHours(),day=d.getDay();
     if(day>0&&day<6&&h>=9&&h<16)return 180;
@@ -1237,14 +1218,11 @@ function App(){
   };
   useEffect(()=>{
     const t=setInterval(()=>setCountdown(c=>{
-      if(c<=1){
-        if(fetchPricesRef.current)fetchPricesRef.current(holdingsRef.current);
-        return getRefreshInterval();
-      }
+      if(c<=1){fetchPrices(holdingsRef.current);return getRefreshInterval();}
       return c-1;
     }),1000);
     return()=>clearInterval(t);
-  },[]);// ← 의존성 제거, ref로 접근하므로 안전
+  },[fetchPrices]);
 
   /* 수익 계산 */
   const calcH=useCallback((h,aid,snap,fx)=>{
@@ -1277,25 +1255,12 @@ function App(){
     return acctOrder.map(id=>base.find(a=>a.id===id)).filter(Boolean);
   },[calcAcct,acctOrder]);
 
-  /* ★ 내 총자산 계산
-     - 총금액(current): AMT×½ + AMT CMA×½ + MyAMT + 일반 + 퇴직 + IRP + ISA + MyCMA (전체 포함)
-     - 투자원금(invested): AMT×½ + MyAMT + 일반 + 퇴직 + IRP + ISA (CMA 전체 제외)
-     - 수익금(pnl): AMT×½ + MyAMT + 일반 + 퇴직 + IRP + ISA (CMA 전체 제외)
-  */
+  /* ★ 내 총자산 (AMT 1/2 + 나머지) */
   const myTotal=useMemo(()=>allAccounts.reduce((s,ac)=>{
     const r=ac.shared ? 0.5 : 1;
-    return{
-      // 총금액: 모든 계좌 포함 (AMT·AMT CMA는 ×½)
-      current: s.current + ac.current*r,
-      // 투자원금: CMA 전체 제외
-      invested: s.invested + (ac.cmaType ? 0 : ac.invested*r),
-    };
+    return{invested:s.invested+ac.invested*r,current:s.current+ac.current*r};
   },{invested:0,current:0}),[allAccounts]);
-  const myPnl=useMemo(()=>allAccounts.reduce((s,ac)=>{
-    if(ac.cmaType)return s; // CMA 수익금 제외
-    const r=ac.shared ? 0.5 : 1;
-    return s+(ac.current-ac.invested)*r;
-  },0),[allAccounts]);
+  const myPnl=myTotal.current-myTotal.invested;
   const myPct=myTotal.invested>0?myPnl/myTotal.invested*100:0;
 
   const curAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===acctTab),[acctTab]);
@@ -1338,52 +1303,52 @@ function App(){
     setForm({_acctId:acctTab,assetType:dt,currency:dt.includes("미국")?"USD":"KRW"});
     setEditIdx(null);setModal("holding");
   },[acctTab]);
-  // ★ 단일 티커 즉시 조회 (모달)
+  // ★ 단일 티커 즉시 조회 (모달 열릴때, 항상 최신 시세)
   const fetchSingleTicker=useCallback(async(ticker,assetType)=>{
     if(!ticker||!AUTO_TYPES.includes(assetType)||assetType==="CMA")return;
-    const isKR=assetType==="국내ETF";
-    const storeKey=isKR?ticker+".KS":ticker;
+    const tk=assetType==="국내ETF"?ticker+".KS":ticker;
     const now=()=>new Date().toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit"});
-    const toNum=s=>parseFloat(String(s||"0").replace(/,/g,""))||0;
-    const save=r=>{setPrices(prev=>{const next={...prev,[storeKey]:r};sv(SK_PRICES,next);return next;});};
-
-    const ao=async(url,ms)=>{
+    const tf=async(url,ms,hdrs)=>{
       const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch("https://api.allorigins.win/get?url="+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const j=await r.json();if(!j?.contents)throw 0;return JSON.parse(j.contents);}
-      catch(e){clearTimeout(t);throw e;}
+      try{
+        const r=await fetch(url,{signal:c.signal,headers:hdrs||{}});
+        clearTimeout(t);if(!r.ok)throw new Error(r.status);
+        const txt=await r.text();if(!txt||txt.startsWith("<")||txt.startsWith("<!"))throw new Error("html");
+        return JSON.parse(txt);
+      }catch(e){clearTimeout(t);throw e;}
     };
-    const go2=async(url,ms)=>{
-      const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
-      try{const r=await fetch("https://corsproxy.io/?"+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const txt=await r.text();if(!txt||txt.startsWith("<"))throw 0;return JSON.parse(txt);}
-      catch(e){clearTimeout(t);throw e;}
+    const pV8=raw=>{
+      try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const m=d?.chart?.result?.[0]?.meta;
+        if(m?.regularMarketPrice&&m.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:m.currency||"KRW",time:now()};}catch(e){}return null;
     };
-    const pYv8=d=>{try{const m=d?.chart?.result?.[0]?.meta;if(m?.regularMarketPrice>0)return{price:m.regularMarketPrice,prev:m.chartPreviousClose||m.regularMarketPrice,currency:isKR?"KRW":m.currency||"USD",time:now()};}catch(e){}return null;};
-    const pYv7=d=>{try{const q=d?.quoteResponse?.result?.[0];if(q?.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:isKR?"KRW":q.currency||"USD",time:now()};}catch(e){}return null;};
-    const pNav=(d,cur)=>{try{if(d?.datas?.[0]){const s=d.datas[0];const p=toNum(s.nv||s.currentPrice||s.closePrice);if(p>0)return{price:p,prev:toNum(s.sv||p),currency:cur,time:now()};}const p=toNum(d?.currentPrice||d?.closePrice||d?.tradePrice||d?.stockPrice);if(p>0)return{price:p,prev:toNum(d?.prevClosingPrice||d?.basePrice||p),currency:cur,time:now()};}catch(e){}return null;};
-
-    const code=ticker.replace(".KS","");
-    const yTk=isKR?code+".KS":ticker;
-    const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
-    const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+yTk+"?interval=1d&range=1d";
-    const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+yTk;
-
-    try{
-      const result=await Promise.any(isKR?[
-        ao("https://polling.finance.naver.com/api/realtime/domestic/stock/"+code,6000).then(d=>{const v=pNav(d,"KRW");if(!v)throw 0;return v;}),
-        go2("https://m.stock.naver.com/api/stock/"+code+"/basic",6000).then(d=>{const v=pNav(d,"KRW");if(!v)throw 0;return v;}),
-        ao(y1,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        go2(y1,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        ao(q1,7000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-      ]:[
-        ao(y1,6000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        go2(y1,6000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        ao(q1,6000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-        go2(q1,6000).then(d=>{const v=pYv7(d);if(!v)throw 0;return v;}),
-        ao(y2,7000).then(d=>{const v=pYv8(d);if(!v)throw 0;return v;}),
-        ao("https://polling.finance.naver.com/api/realtime/worldstock/stock/"+ticker,7000).then(d=>{const v=pNav(d,"USD");if(!v)throw 0;return v;}),
-      ]);
-      if(result)save(result);
-    }catch(e){}
+    const pV7=raw=>{
+      try{const d=(raw?.contents)?JSON.parse(raw.contents):raw;const q=d?.quoteResponse?.result?.[0];
+        if(q?.regularMarketPrice&&q.regularMarketPrice>0)return{price:q.regularMarketPrice,prev:q.regularMarketPreviousClose||q.regularMarketPrice,currency:q.currency||"KRW",time:now()};}catch(e){}return null;
+    };
+    const save=r=>{setPrices(prev=>{const next={...prev,[tk]:r};sv(SK_PRICES,next);return next;});};
+    const y1="https://query1.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+    const y2="https://query2.finance.yahoo.com/v8/finance/chart/"+tk+"?interval=1d&range=1d";
+    const q1="https://query1.finance.yahoo.com/v7/finance/quote?symbols="+tk;
+    const q2="https://query2.finance.yahoo.com/v7/finance/quote?symbols="+tk;
+    const sources=[
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(y2),8000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://api.allorigins.win/get?url="+encodeURIComponent(q2),8000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?url="+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?"+encodeURIComponent(y1),9000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://corsproxy.io/?"+encodeURIComponent(q1),9000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      tf("https://thingproxy.freeboard.io/fetch/"+y1,10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+      tf("https://proxy.cors.sh/"+y1,10000,{"x-cors-api-key":"temp_pf"}).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+    ];
+    try{const r=await Promise.any(sources);if(r)save(r);}
+    catch(e){
+      await new Promise(res=>setTimeout(res,2000));
+      try{const r=await Promise.any([
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(y1),10000).then(j=>{const r=pV8(j);if(!r)throw 0;return r;}),
+        tf("https://api.allorigins.win/get?url="+encodeURIComponent(q1),10000).then(j=>{const r=pV7(j);if(!r)throw 0;return r;}),
+      ]);if(r)save(r);}catch(e2){}
+    }
   },[]);
 
   const openEdit=useCallback((aid,idx)=>{
@@ -1409,7 +1374,7 @@ function App(){
     if(editIdx!==null)list[editIdx]=entry;else list.push(entry);
     const next={...holdings,[aid]:list};
     setHoldings(next);holdingsRef.current=next;
-    if(!ac?.cmaType&&entry.assetType!=="적금"&&entry.assetType!=="펀드"&&entry.assetType!=="CMA"){if(fetchPricesRef.current)fetchPricesRef.current(next);}
+    if(!ac?.cmaType&&entry.assetType!=="적금"&&entry.assetType!=="펀드"&&entry.assetType!=="CMA")fetchPrices(next);
     setModal(null);setForm({});setEditIdx(null);
     showToast(editIdx!==null?"수정 완료!":"종목 추가 완료!");
   },[form,editIdx,holdings,fetchPrices,showToast]);
@@ -1494,16 +1459,16 @@ function App(){
         <div style={{fontSize:10,color:C.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>MY PORTFOLIO</div>
         <div style={{fontSize:34,fontWeight:800,color:"#fff",letterSpacing:-1.5,lineHeight:1.1}}>{won(myTotal.current)}</div>
         <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,flexWrap:"wrap"}}>
-          <span style={{fontSize:13,color:C.sub}}>투자원금(CMA제외) {won(myTotal.invested)}</span>
+          <span style={{fontSize:13,color:C.sub}}>내 투자원금 {won(myTotal.invested)}</span>
           <ProfitBadge pct={myPct} pnl={myPnl} size="lg"/>
         </div>
 
-        {/* ★ KPI 카드 3개 */}
+        {/* ★ KPI 카드 3개 (총투자원금 / 총수익률 / 총수익금액) */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:14}}>
           {[
-            {label:"투자원금 (CMA제외)",value:won(myTotal.invested),color:C.sub},
-            {label:"수익률 (CMA제외)",value:pf(myPct),color:myPct>=0?C.up:C.dn},
-            {label:"수익금 (CMA제외)",value:`${myPnl>=0?"+":""}${won(myPnl)}`,color:myPnl>=0?C.up:C.dn},
+            {label:"총 투자원금",value:won(myTotal.invested),color:C.sub},
+            {label:"총 수익률",value:pf(myPct),color:myPct>=0?C.up:C.dn},
+            {label:"총 수익금액",value:`${myPnl>=0?"+":""}${won(myPnl)}`,color:myPnl>=0?C.up:C.dn},
           ].map((k,i)=>(
             <div key={i} style={{background:"rgba(255,255,255,0.05)",borderRadius:12,padding:"10px 10px",border:"1px solid rgba(255,255,255,0.08)",textAlign:"center"}}>
               <div style={{fontSize:9,color:C.muted,marginBottom:5,letterSpacing:.3}}>{k.label}</div>
@@ -1512,7 +1477,7 @@ function App(){
           ))}
         </div>
         <div style={{fontSize:10,color:C.muted,marginTop:6}}>
-          ※ 총금액=전체계좌합산(AMT·AMTCMA는½) · 투자원금·수익=CMA제외 · {fetching&&!fxAuto?"⏳ 환율 조회중...":fxAuto?`$1=₩${fxRate} · ${fxTime}`:`$1=₩${fxRate}`}
+          ※ AMT/AMT CMA 1/2 · {fetching&&!fxAuto?"⏳ 환율 조회중...":fxAuto?`$1=₩${fxRate} · 환율 ${fxTime}`:`$1=₩${fxRate}`}
         </div>
 
         {/* 자동갱신 바 */}
@@ -1521,7 +1486,7 @@ function App(){
             <div style={{height:"100%",background:C.accent,width:`${(countdown/getRefreshInterval())*100}%`,transition:"width 1s linear",borderRadius:2}}/>
           </div>
           <span style={{fontSize:11,color:C.muted,whiteSpace:"nowrap"}}>{fetching?"⏳ 갱신중...":`🔄 ${mins}:${secs}`}</span>
-          <button onClick={()=>fetchPricesRef.current&&fetchPricesRef.current(holdingsRef.current)} style={{minHeight:36,padding:"0 12px",background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.accent,fontSize:12}}>지금</button>
+          <button onClick={()=>fetchPrices(holdingsRef.current)} style={{minHeight:36,padding:"0 12px",background:"none",border:`1px solid ${C.border}`,borderRadius:8,color:C.accent,fontSize:12}}>지금</button>
         </div>
         <div style={{fontSize:11,color:C.muted,marginTop:3}}>{lastUp?`시세: ${lastUp}`:"⏳ 시세 갱신 중..."} · ETF·주식·환율 자동 / 펀드·CMA·적금 자동계산</div>
         <div style={{display:"flex",gap:8,marginTop:12}}>
@@ -1583,28 +1548,14 @@ function App(){
                         <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                           <span style={{fontSize:16}}>{ac.icon}</span>
                           <span style={{fontSize:15,fontWeight:700,color:C.text}}>{ac.label}</span>
-                          {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동계좌</span>}
+                          {ac.shared&&<span style={{fontSize:10,color:"#f59e0b",background:"#f59e0b1a",padding:"2px 7px",borderRadius:10}}>공동 1/2</span>}
                           {ac.pensionHint&&<span style={{fontSize:10,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 7px",borderRadius:10}}>퇴직연금</span>}
                         </div>
-                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>
-                          {(ac.list||[]).length}종목 · 투자금 {won(ac.shared?ac.invested:myInv)}
-                        </div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>{(ac.list||[]).length}종목 · 투자금 {won(myInv)}</div>
                       </div>
                       <div style={{textAlign:"right",flexShrink:0}}>
-                        {ac.shared?(
-                          <>
-                            {/* AMT: 계좌 총액 크게 + 내 몫 작게 */}
-                            <div style={{fontSize:11,color:"#f59e0b",marginBottom:1}}>계좌 총액</div>
-                            <div style={{fontSize:17,fontWeight:800,color:C.text}}>{won(ac.current)}</div>
-                            <div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>내 몫 {won(myCur)}</div>
-                            <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
-                          </>
-                        ):(
-                          <>
-                            <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
-                            <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
-                          </>
-                        )}
+                        <div style={{fontSize:15,fontWeight:800,color:C.text}}>{won(myCur)}</div>
+                        <ProfitBadge pct={ac.pct} pnl={myP} size="sm"/>
                       </div>
                     </div>
                     <MiniBar pct={ac.pct}/>
@@ -1635,27 +1586,12 @@ function App(){
                     {curAcct.pensionHint&&<span style={{fontSize:11,color:"#a78bfa",background:"#a78bfa1a",padding:"2px 8px",borderRadius:10}}>🏦 퇴직연금</span>}
                   </div>
                   {curAcct.pensionHint&&<div style={{fontSize:12,color:C.sub,lineHeight:1.6}}>국내ETF: 티커+수량+평균단가 → 자동시세 | 펀드: 기준가+보유좌수 → 자동계산</div>}
-                  {curAcct.shared&&<div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>🤝 공동계좌 — 총액의 1/2이 내 몫으로 집계됩니다</div>}
-                  <div style={{fontSize:12,color:C.muted,marginTop:4}}>
-                    투자원금 {won(curData.invested)}
-                    {curAcct.shared&&<span style={{color:"#f59e0b",marginLeft:4}}>(내 1/2: {won(curData.invested*0.5)})</span>}
-                  </div>
+                  {curAcct.shared&&<div style={{fontSize:12,color:"#f59e0b",marginTop:2}}>수익의 1/2이 내 몫으로 집계</div>}
+                  <div style={{fontSize:12,color:C.muted,marginTop:4}}>투자원금 {won(curData.invested)}</div>
                 </div>
                 <div style={{textAlign:"right",flexShrink:0}}>
-                  {/* AMT계좌: 총액 + 내 몫 분리 표시 */}
-                  {curAcct.shared?(
-                    <>
-                      <div style={{fontSize:13,color:C.muted,marginBottom:2}}>계좌 총액</div>
-                      <div style={{fontSize:18,fontWeight:800,color:C.text}}>{won(curData.current)}</div>
-                      <div style={{fontSize:11,color:"#f59e0b",marginTop:3}}>내 몫(1/2) {won(curData.current*0.5)}</div>
-                      <ProfitBadge pct={curData.pct} pnl={curData.pnl*0.5}/>
-                    </>
-                  ):(
-                    <>
-                      <div style={{fontSize:20,fontWeight:800,color:C.text}}>{won(curData.current)}</div>
-                      <ProfitBadge pct={curData.pct} pnl={curData.pnl}/>
-                    </>
-                  )}
+                  <div style={{fontSize:20,fontWeight:800,color:C.text}}>{won(curData.current)}</div>
+                  <ProfitBadge pct={curData.pct} pnl={curData.pnl}/>
                 </div>
               </div>
               <MiniBar pct={curData.pct}/>
