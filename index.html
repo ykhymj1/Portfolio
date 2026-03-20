@@ -1044,7 +1044,7 @@ function App(){
       (async()=>{
         const c=new AbortController();const t=setTimeout(()=>c.abort(),6000);
         try{
-          const r=await fetch("https://exconvert.com/api/convert?from=USD&to=KRW&amount=1&accessKey=cd94debe-e32c0a05-7ec91d21-86dcf56a",{signal:c.signal});
+          const r=await fetch("https://api.exconvert.com/convert?access_key=cd94debe-e32c0a05-7ec91d21-86dcf56a&from=USD&to=KRW&amount=1",{signal:c.signal});
           clearTimeout(t);
           const d=await r.json();
           const v=d?.result?.KRW??d?.result?.rate;
