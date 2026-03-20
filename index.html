@@ -1029,7 +1029,7 @@ function App(){
   /* ★ 환율 조회 */
   const fetchFxRate=useCallback(async()=>{
     const isValid=v=>v&&v>500&&v<5000;
-    const toNum=s=>parseFloat(String(s||"0").replace(/,/g,""))||0;
+    const EXCONVERT_KEY="cd94debe-e32c0a05-7ec91d21-86dcf56a";
     const go=async(url,ms)=>{
       const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
       try{const r=await fetch("https://api.allorigins.win/get?url="+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const j=await r.json();if(!j?.contents)throw 0;return JSON.parse(j.contents);}
@@ -1040,21 +1040,36 @@ function App(){
       try{const r=await fetch("https://corsproxy.io/?"+encodeURIComponent(url),{signal:c.signal});clearTimeout(t);const txt=await r.text();if(!txt||txt.startsWith("<"))throw 0;return JSON.parse(txt);}
       catch(e){clearTimeout(t);throw e;}
     };
+    // ExConvert 직접 호출 (CORS 허용)
+    const goEx=async(url,ms)=>{
+      const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
+      try{const r=await fetch(url,{signal:c.signal});clearTimeout(t);const txt=await r.text();if(!txt||txt.startsWith("<"))throw 0;return JSON.parse(txt);}
+      catch(e){clearTimeout(t);throw e;}
+    };
     const extract=d=>{
       const toNum=s=>parseFloat(String(s||"0").replace(/,/g,""))||0;
+      // ExConvert 응답: { base:"USD", result:{ KRW: 1375.5 }, rate: 1375.5 }
+      if(d?.result?.KRW){const v=toNum(d.result.KRW);if(isValid(v))return Math.round(v);}
+      if(d?.rate){const v=toNum(d.rate);if(isValid(v))return Math.round(v);}
       if(d?.datas?.[0]){const v=toNum(d.datas[0].nv||d.datas[0].closePrice||d.datas[0].currentPrice);if(isValid(v))return Math.round(v);}
-      const fields=[d?.rates?.KRW,d?.usd?.krw,d?.currentPrice,d?.closePrice,d?.rate,d?.krw];
+      const fields=[d?.rates?.KRW,d?.usd?.krw,d?.currentPrice,d?.closePrice,d?.krw];
       for(const f of fields){const v=toNum(f);if(isValid(v))return Math.round(v);}
       return null;
     };
+    const exUrl1="https://api.exconvert.com/fetchOne?base=USD&to=KRW&access_key="+EXCONVERT_KEY;
+    const exUrl2="https://api.exconvert.com/convert?from=USD&to=KRW&amount=1&access_key="+EXCONVERT_KEY;
     try{
       const rounded=await Promise.any([
+        // ★ ExConvert 1순위 (무제한 무료)
+        goEx(exUrl1,5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
+        goEx(exUrl2,5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
+        go(exUrl1,6000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
+        // 기존 백업
         go("https://polling.finance.naver.com/api/realtime/worldstock/marketIndex/FX_USDKRW",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
         go("https://m.stock.naver.com/api/forex/usdkrw",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
         go2("https://api.exchangerate-api.com/v4/latest/USD",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
         go("https://open.er-api.com/v6/latest/USD",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
         go("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",5000).then(d=>{const v=extract(d);if(!v)throw 0;return v;}),
-        go("https://query1.finance.yahoo.com/v8/finance/chart/USDKRW%3DX?interval=1d&range=1d",6000).then(d=>{const v=d?.chart?.result?.[0]?.meta?.regularMarketPrice;if(!isValid(v))throw 0;return Math.round(v);}),
       ]);
       const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
       setFxRate(rounded);fxRateRef.current=rounded;setFxAuto(true);setFxTime(time);
