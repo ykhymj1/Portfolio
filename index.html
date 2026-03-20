@@ -823,7 +823,7 @@ const FormModal=memo(function FormModal({show,form,setForm,editIdx,mAcct,prices,
 });
 
 /* 설정 모달 */
-const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFxRate,onClose,showToast,onFetchFx}){
+const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,fxSource,setFxRate,onClose,showToast,onFetchFx}){
   if(!show)return null;
   const[loading,setLoading]=useState(false);
   const INP={background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,color:C.text,padding:"13px 14px",fontSize:16,width:"100%",outline:"none",display:"block"};
@@ -860,7 +860,7 @@ const SettingsModal=memo(function SettingsModal({show,fxRate,fxAuto,fxTime,setFx
               <div style={{fontSize:14,fontWeight:700,color:C.text,marginBottom:4}}>$1 = ₩{fxRate}</div>
               <div style={{fontSize:11,color:C.green}}>✅ 자동 업데이트 성공</div>
               {fxTime&&<div style={{fontSize:12,color:C.accent,marginTop:3}}>⏱ 마지막 업데이트: <b style={{color:"#34d399"}}>{fxTime}</b></div>}
-              <div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: open.er-api.com / jsdelivr / Yahoo Finance</div>
+              {fxSource&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>출처: {fxSource}</div>}
             </>)
             :(<>
               <div style={{fontSize:13,color:C.sub}}>아직 자동 조회 전입니다.</div>
@@ -905,6 +905,9 @@ function App(){
   });
   const[fxTime,setFxTime]=useState(()=>{
     try{ const c=JSON.parse(localStorage.getItem(SK_FX)||"{}"); return c.time||null; }catch(e){ return null; }
+  });
+  const[fxSource,setFxSource]=useState(()=>{
+    try{ const c=JSON.parse(localStorage.getItem(SK_FX)||"{}"); return c.source||null; }catch(e){ return null; }
   });
   const[prices,setPrices]=useState(()=>{
     // 캐시 복원 시 time 필드 제거 (오래된 시간 표시 방지)
@@ -1035,8 +1038,9 @@ function App(){
         throw new Error('invalid');
       }catch(e){clearTimeout(t);throw e;}
     };
+    const tryFetchNamed=async(name,url,extract)=>{const v=await tryFetch(url,extract);return{v,name};};
     const sources=[
-      // exconvert.com 메인 - {"base":"USD","amount":"1","result":{"KRW":1456.12,"rate":1456.12}}
+      // exconvert.com 메인
       (async()=>{
         const c=new AbortController();const t=setTimeout(()=>c.abort(),6000);
         try{
@@ -1044,20 +1048,19 @@ function App(){
           clearTimeout(t);
           const d=await r.json();
           const v=d?.result?.KRW??d?.result?.rate;
-          if(isValid(v))return Math.round(v);
+          if(isValid(v))return{v:Math.round(v),name:"exconvert.com"};
           throw new Error('invalid');
         }catch(e){clearTimeout(t);throw e;}
       })(),
-      // 무료 폴백 소스들
-      tryFetch("https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
-      tryFetch("https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
-      tryFetch("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
+      tryFetchNamed("exchangerate-api.com","https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
+      tryFetchNamed("open.er-api.com","https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
+      tryFetchNamed("jsdelivr(fawazahmed0)","https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
     ];
     try{
-      const rounded=await Promise.any(sources);
+      const{v:rounded,name:srcName}=await Promise.any(sources);
       const time=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-      setFxRate(rounded);fxRateRef.current=rounded;setFxAuto(true);setFxTime(time);
-      try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time}));}catch(e){}
+      setFxRate(rounded);fxRateRef.current=rounded;setFxAuto(true);setFxTime(time);setFxSource(srcName);
+      try{localStorage.setItem(SK_FX,JSON.stringify({rate:rounded,time,source:srcName}));}catch(e){}
       return rounded;
     }catch(e){return null;}
   },[]);
@@ -1746,7 +1749,7 @@ function App(){
 
       {/* 모달들 */}
       <FormModal show={modal==="holding"} form={form} setForm={setForm} editIdx={editIdx} mAcct={mAcct} prices={prices} fxRate={fxRate} onSave={saveHolding} onClose={()=>setModal(null)} onFetchTicker={fetchSingleTicker}/>
-      <SettingsModal show={modal==="settings"} fxRate={fxRate} fxAuto={fxAuto} fxTime={fxTime} setFxRate={setFxRate} onClose={()=>setModal(null)} showToast={showToast} onFetchFx={fetchFxRate}/>
+      <SettingsModal show={modal==="settings"} fxRate={fxRate} fxAuto={fxAuto} fxTime={fxTime} fxSource={fxSource} setFxRate={setFxRate} onClose={()=>setModal(null)} showToast={showToast} onFetchFx={fetchFxRate}/>
       {modal==="confirm"&&confirmCb&&(<ConfirmModal msg="이 종목을 삭제할까요? 삭제 후 복구가 어렵습니다." onOk={confirmCb.fn} onCancel={()=>{setModal(null);setConfirmCb(null);}}/>)}
     </div>
   );
