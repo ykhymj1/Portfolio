@@ -1038,32 +1038,42 @@ function App(){
         throw new Error('invalid');
       }catch(e){clearTimeout(t);throw e;}
     };
-    // ★ exconvert 우선 순차 시도 → 실패 시 폴백
-    const tryFetchNamed=async(name,url,extract)=>{
-      const v=await tryFetch(url,extract);return{v,name};
-    };
+    // ★ 1순위: exconvert (allorigins 프록시로 HTTPS 우회)
+    // ★ 2순위: fawazahmed0 CDN (키 없음, 완전 무료)
+    const EX_URL="http://api.exconvert.com/convert?access_key=cd94debe-e32c0a05-7ec91d21-86dcf56a&from=USD&to=KRW&amount=1";
     const tryExconvert=async()=>{
-      const c=new AbortController();const t=setTimeout(()=>c.abort(),10000);
+      const proxyUrls=[
+        "https://api.allorigins.win/get?url="+encodeURIComponent(EX_URL),
+        "https://corsproxy.io/?"+encodeURIComponent(EX_URL),
+      ];
+      for(const proxy of proxyUrls){
+        const c=new AbortController();const t=setTimeout(()=>c.abort(),10000);
+        try{
+          const r=await fetch(proxy,{signal:c.signal});
+          clearTimeout(t);
+          const j=await r.json();
+          const raw=j?.contents?JSON.parse(j.contents):j;
+          const v=raw?.result?.KRW??raw?.result?.rate;
+          if(isValid(v))return{v:Math.round(v),name:"exconvert.com"};
+        }catch(e){clearTimeout(t);}
+      }
+      throw new Error('exconvert failed');
+    };
+    const tryFawazahmed=async()=>{
+      const c=new AbortController();const t=setTimeout(()=>c.abort(),8000);
       try{
-        const r=await fetch("https://api.exconvert.com/convert?access_key=cd94debe-e32c0a05-7ec91d21-86dcf56a&from=USD&to=KRW&amount=1",{signal:c.signal});
+        const r=await fetch("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",{signal:c.signal});
         clearTimeout(t);
         const d=await r.json();
-        const v=d?.result?.KRW??d?.result?.rate;
-        if(isValid(v))return{v:Math.round(v),name:"exconvert.com"};
+        const v=d?.usd?.krw;
+        if(isValid(v))return{v:Math.round(v),name:"fawazahmed0 CDN"};
         throw new Error('invalid');
       }catch(e){clearTimeout(t);throw e;}
     };
     let result=null;
     try{ result=await tryExconvert(); }catch(e){}
     if(!result){
-      // exconvert 실패 시에만 폴백 소스 병렬 시도
-      try{
-        result=await Promise.any([
-          tryFetchNamed("exchangerate-api.com","https://api.exchangerate-api.com/v4/latest/USD",d=>d?.rates?.KRW),
-          tryFetchNamed("open.er-api.com","https://open.er-api.com/v6/latest/USD",d=>d?.rates?.KRW),
-          tryFetchNamed("jsdelivr(fawazahmed0)","https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",d=>d?.usd?.krw),
-        ]);
-      }catch(e){}
+      try{ result=await tryFawazahmed(); }catch(e){}
     }
     try{
       if(!result)return null;
