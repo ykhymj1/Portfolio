@@ -1278,12 +1278,29 @@ function App(){
     return acctOrder.map(id=>base.find(a=>a.id===id)).filter(Boolean);
   },[calcAcct,acctOrder]);
 
-  /* ★ 내 총자산 (AMT 1/2 + 나머지) */
-  const myTotal=useMemo(()=>allAccounts.reduce((s,ac)=>{
-    const r=ac.shared ? 0.5 : 1;
-    return{invested:s.invested+ac.invested*r,current:s.current+ac.current*r};
-  },{invested:0,current:0}),[allAccounts]);
-  const myPnl=myTotal.current-myTotal.invested;
+  /* ★ 내 총자산 */
+  // current: 전체 계좌 합산 (amtcma×0.5, mycma 포함) → 상단 총금액
+  // invested/pnl/pct: CMA 제외 (amtcma, mycma 제외) → 투자원금/수익률 계산
+  const myTotal=useMemo(()=>{
+    const current=allAccounts.reduce((s,ac)=>{
+      const r=ac.shared ? 0.5 : 1;
+      return s+ac.current*r;
+    },0);
+    // 투자원금·수익 계산에서 CMA 계좌 제외
+    const nonCma=allAccounts.filter(ac=>!ac.cmaType);
+    const invested=nonCma.reduce((s,ac)=>{
+      const r=ac.shared ? 0.5 : 1;
+      return s+ac.invested*r;
+    },0);
+    return{current,invested};
+  },[allAccounts]);
+  const myPnl=useMemo(()=>{
+    const nonCma=allAccounts.filter(ac=>!ac.cmaType);
+    return nonCma.reduce((s,ac)=>{
+      const r=ac.shared ? 0.5 : 1;
+      return s+(ac.current-ac.invested)*r;
+    },0);
+  },[allAccounts]);
   const myPct=myTotal.invested>0?myPnl/myTotal.invested*100:0;
 
   const curAcct=useMemo(()=>ACCOUNTS.find(a=>a.id===acctTab),[acctTab]);
